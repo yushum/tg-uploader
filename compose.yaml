@@ -1,0 +1,28 @@
+services:
+  tg-uploader:
+    image: yushum/tg-uploader:latest
+    container_name: tg_uploader
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+      - API_ID=${API_ID}
+      - API_HASH=${API_HASH}
+      - CHANNEL_ID=${CHANNEL_ID}
+      - WATCH_DIR=/downloads
+      - SESSION_NAME=/app/session/uploader
+      - DB_PATH=/app/session/uploader.db
+      
+      # [Optional] Custom Device Name
+      # - DEVICE_MODEL=TG-Uploader
+      # - SYSTEM_VERSION=Linux
+      # - APP_VERSION=1.0
+      
+      # [Optional] Proxy Configuration (e.g. socks5://127.0.0.1:1080)
+      # - PROXY_TYPE=socks5
+      # - PROXY_HOST=127.0.0.1
+      # - PROXY_PORT=1080
+      
+    volumes:
+      - ./downloads:/downloads
+      - ./session:/app/session
+    stop_grace_period: 2m

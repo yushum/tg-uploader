@@ -1,0 +1,785 @@
+import os
+import time
+import asyncio
+import sqlite3
+import logging
+import signal
+import subprocess
+import re
+import json
+import random
+import math
+from pathlib import Path
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
+from telethon.tl.types import DocumentAttributeVideo, InputFileBig
+from telethon.tl.functions.upload import SaveBigFilePartRequest
+
+# ---------------- Configuration ----------------
+API_ID = int(os.getenv('API_ID', '0'))
+API_HASH = os.getenv('API_HASH', '')
+CHANNEL_ID = int(os.getenv('CHANNEL_ID', '0'))
+WATCH_DIR = os.getenv('WATCH_DIR', '/downloads')
+SESSION_NAME = os.getenv('SESSION_NAME', '/app/session/uploader')
+DB_PATH = os.getenv('DB_PATH', '/app/session/uploader.db')
+MAX_SPLIT_SIZE_MB = int(os.getenv('MAX_SPLIT_SIZE_MB', '4000'))
+CHECK_INTERVAL = 15  # File stability check interval in seconds
+
+# ---------------- Customization & Network ----------------
+DEVICE_MODEL = os.getenv('DEVICE_MODEL', 'TG-Uploader-Pro')
+SYSTEM_VERSION = os.getenv('SYSTEM_VERSION', 'Linux')
+APP_VERSION = os.getenv('APP_VERSION', '2.0')
+
+# Proxy Configuration (e.g., PROXY_TYPE=socks5, PROXY_HOST=127.0.0.1, PROXY_PORT=1080)
+PROXY_TYPE = os.getenv('PROXY_TYPE', '')
+PROXY_HOST = os.getenv('PROXY_HOST', '')
+PROXY_PORT = os.getenv('PROXY_PORT', '')
+
+# ---------------- 日志配置 ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s][%(levelname)s][%(module)s] %(message)s'
+)
+# Suppress overly verbose logs from Telethon
+logging.getLogger('telethon').setLevel(logging.WARNING)
+logger = logging.getLogger('tg-uploader')
+
+is_running = True
+
+def handle_shutdown_signal(signum, frame):
+    global is_running
+    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    is_running = False
+
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGTERM, handle_shutdown_signal)
+signal.signal(signal.SIGINT, handle_shutdown_signal)
+
+# ---------------- Database ----------------
+def init_db() -> sqlite3.Connection:
+    """初始化 SQLite 数据库并显式开启 WAL 模式"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('PRAGMA journal_mode=WAL;')
+    conn.execute('PRAGMA synchronous=NORMAL;')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS uploads (
+            filepath TEXT PRIMARY KEY,
+            status TEXT,
+            message_id INTEGER,
+            uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    try:
+        conn.execute('ALTER TABLE uploads ADD COLUMN message_id INTEGER;')
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
+
+    # 关键健壮性修复：重启时，将所有因为意外中断而卡在 UPLOADING 状态的任务重置，让其能够被重新扫描上传
+    conn.execute('UPDATE uploads SET status = "PENDING" WHERE status = "UPLOADING"')
+    conn.commit()
+    return conn
+
+def get_upload_status(conn: sqlite3.Connection, filepath: str) -> str:
+    """查询文件的上传状态"""
+    cursor = conn.execute('SELECT status FROM uploads WHERE filepath = ?', (filepath,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+def update_upload_status(conn: sqlite3.Connection, filepath: str, status: str, message_id: int = None):
+    """更新/插入文件的上传状态及可选的 TG 消息 ID (防重复)"""
+    conn.execute('''
+        INSERT INTO uploads (filepath, status, message_id) VALUES (?, ?, ?)
+        ON CONFLICT(filepath) DO UPDATE SET 
+            status=excluded.status, 
+            message_id=COALESCE(excluded.message_id, uploads.message_id), 
+            uploaded_at=CURRENT_TIMESTAMP
+    ''', (filepath, status, message_id))
+    conn.commit()
+
+def get_upload_message_id(conn: sqlite3.Connection, filepath_pattern: str) -> int:
+    """模糊查询符合条件的记录的 message_id"""
+    cursor = conn.execute('SELECT message_id FROM uploads WHERE filepath LIKE ? AND status = "COMPLETED" AND message_id IS NOT NULL', (f"%{filepath_pattern}%",))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+# ---------------- 视频处理模块 ----------------
+async def generate_thumbnail(video_path: str) -> str:
+    """
+    使用 FFmpeg 截取视频封面。
+    性能优化：将 -ss 参数放在 -i 前面，实现快速寻道，防止 I/O 阻塞和 CPU 爆满。
+    """
+    thumb_path = f"{video_path}.thumb.jpg"
+    # 如果处于只读挂载目录，将封面生成在临时目录，避免权限报错
+    if not os.access(os.path.dirname(video_path), os.W_OK):
+        thumb_path = os.path.join('/tmp', f"{os.path.basename(video_path)}.thumb.jpg")
+        
+    try:
+        cmd = [
+            'ffmpeg', '-y',
+            '-ss', '00:00:05',
+            '-i', video_path,
+            '-vframes', '1',
+            '-vf', 'scale=320:-1',
+            '-q:v', '5',
+            thumb_path
+        ]
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        # 增加 60 秒超时控制，防止 ffmpeg 因坏文件出现死锁/僵尸进程
+        await asyncio.wait_for(process.communicate(), timeout=60)
+        
+        if process.returncode == 0 and os.path.exists(thumb_path):
+            return thumb_path
+    except asyncio.TimeoutError:
+        logger.error(f"FFmpeg thumbnail generation timed out for {video_path}")
+        if process:
+            process.kill()
+    except Exception as e:
+        logger.error(f"Failed to generate thumbnail for {video_path}: {e}")
+        
+    return None
+
+async def get_video_attributes(video_path: str):
+    """使用 ffprobe 提取视频的时长、宽、高元数据，防止 Telegram 渲染为小方块或错误比例"""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height:format=duration',
+            '-of', 'json',
+            video_path
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        # 增加 30 秒超时控制，防止 ffprobe 僵死
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
+        info = json.loads(stdout)
+        
+        width = int(info.get('streams', [{}])[0].get('width', 0))
+        height = int(info.get('streams', [{}])[0].get('height', 0))
+        duration = int(float(info.get('format', {}).get('duration', 0)))
+        
+        return width, height, duration
+    except Exception as e:
+        logger.error(f"Failed to extract video attributes for {video_path}: {e}")
+        return 0, 0, 0
+
+# ---------------- 核心上传模块 ----------------
+async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Connection, semaphore: asyncio.Semaphore):
+    """处理视频的缩略图生成与 TG 异步流式上传"""
+    if not is_running:
+        return
+        
+    logger.info(f"Task queued for: {filepath}")
+    
+    async with semaphore:
+        if not is_running:
+            return
+            
+        logger.info(f"Starting processing and upload for: {filepath}")
+        
+        # [0字节文件防御机制] 如果由于录制异常产生了 0 字节的文件，直接抛弃并清理
+        if os.path.exists(filepath) and os.path.getsize(filepath) == 0:
+            logger.warning(f"File {filepath} is 0 bytes. Skipping upload and auto-cleaning.")
+            update_upload_status(conn, filepath, 'SKIPPED_EMPTY_FILE')
+            try:
+                os.remove(filepath)
+                dir_path = os.path.dirname(filepath)
+                watch_dir_abs_list = [os.path.abspath(d.strip()) for d in WATCH_DIR.split(',') if d.strip()]
+                while dir_path and os.path.abspath(dir_path) not in watch_dir_abs_list:
+                    if not os.listdir(dir_path):
+                        os.rmdir(dir_path)
+                        logger.info(f"Empty directory auto-cleaned: {dir_path}")
+                        dir_path = os.path.dirname(dir_path)
+                    else:
+                        break
+            except Exception as e:
+                logger.warning(f"Cleanup for 0-byte file failed: {e}")
+            return
+            
+        # [超大文件切割预处理]
+        file_size_bytes = os.path.getsize(filepath)
+        max_size_bytes = MAX_SPLIT_SIZE_MB * 1024 * 1024
+        
+        if file_size_bytes > max_size_bytes:
+            logger.info(f"File {filepath} exceeds limit ({file_size_bytes} > {max_size_bytes} bytes). Initiating lossless split...")
+            _, _, duration = await get_video_attributes(filepath)
+            if duration > 0:
+                bytes_per_sec = file_size_bytes / duration
+                # 预留 2% 安全余量
+                target_seconds = math.floor((max_size_bytes * 0.98) / bytes_per_sec)
+                
+                if target_seconds > 0:
+                    filename = os.path.basename(filepath)
+                    name_without_ext, _ = os.path.splitext(filename)
+                    dir_path = os.path.dirname(filepath)
+                    
+                    parts = name_without_ext.split('_')
+                    
+                    current_start = 0
+                    part_idx = 0
+                    split_failed = False
+                    
+                    while current_start < duration:
+                        if len(parts) >= 4 and parts[-1].isdigit():
+                            # 已有切片编号，直接追加位数（例如 001 变成 00100, 00101）
+                            output_file = os.path.join(dir_path, f"{name_without_ext}{part_idx:02d}.mp4")
+                        else:
+                            # 没有切片编号，直接按标准格式附加 _000, _001
+                            output_file = os.path.join(dir_path, f"{name_without_ext}_{part_idx:03d}.mp4")
+                            
+                        cmd = [
+                            'ffmpeg', '-y',
+                            '-ss', str(current_start),
+                            '-i', filepath,
+                            '-t', str(target_seconds),
+                            '-c', 'copy',
+                            '-movflags', '+faststart',
+                            output_file
+                        ]
+                        logger.info(f"Splitting part {part_idx} (start={current_start}s, target={target_seconds}s): {cmd}")
+                        
+                        process = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL
+                        )
+                        try:
+                            await asyncio.wait_for(process.communicate(), timeout=300)
+                        except asyncio.TimeoutError:
+                            logger.error(f"FFmpeg split timed out at part {part_idx} for {filepath}")
+                            if process: process.kill()
+                            split_failed = True
+                            break
+                            
+                        if process.returncode != 0:
+                            # 如果是因为到达文件末尾导致的小数点精度问题，忽略该错误
+                            if not os.path.exists(output_file) or os.path.getsize(output_file) < 1024:
+                                try: os.remove(output_file)
+                                except: pass
+                            else:
+                                logger.error(f"FFmpeg split failed at part {part_idx} with code {process.returncode}")
+                                split_failed = True
+                                break
+                        else:
+                            # 清理可能生成的极小空文件
+                            if os.path.exists(output_file) and os.path.getsize(output_file) < 1024:
+                                try: os.remove(output_file)
+                                except: pass
+                                
+                        current_start += target_seconds
+                        part_idx += 1
+                        
+                    if not split_failed:
+                        logger.info(f"Manual split successful for {filepath}. Removed original huge file and yielding to radar.")
+                        update_upload_status(conn, filepath, 'SKIPPED_FOR_SPLIT')
+                        try:
+                            os.remove(filepath)
+                        except Exception as e:
+                            logger.warning(f"Failed to remove original huge file {filepath}: {e}")
+                        return
+                    else:
+                        update_upload_status(conn, filepath, 'FAILED')
+                        return
+            else:
+                logger.warning(f"Could not get duration for {filepath}, cannot split. Proceeding with raw upload (will likely fail at Telegram API).")
+                
+        update_upload_status(conn, filepath, 'UPLOADING')
+        
+        is_temp_mp4 = False
+        upload_target_path = filepath
+        thumb_path = None
+        
+        if filepath.lower().endswith(('.ts', '.flv', '.mkv')):
+            filename_no_ext = os.path.splitext(os.path.basename(filepath))[0]
+            
+            # [竞态防御机制] 检查对应的 MP4 文件是否已经存在，或已经被成功上传
+            possible_mp4 = os.path.join(os.path.dirname(filepath), f"{filename_no_ext}.mp4")
+            if os.path.exists(possible_mp4) or get_upload_status(conn, possible_mp4) in ('COMPLETED', 'UPLOADING'):
+                logger.info(f"Race condition averted: Native MP4 already exists or uploaded for {filepath}, skipping TS rescue.")
+                update_upload_status(conn, filepath, 'SKIPPED_FOR_NATIVE_MP4')
+                try:
+                    if os.path.exists(filepath): os.remove(filepath)
+                except Exception: pass
+                return
+                
+            # 极速转封装：将 ts/flv/mkv 无损转换为 mp4，输出到可写的 session 临时目录，并加入 UUID 防止重名冲突
+            import uuid
+            unique_suffix = uuid.uuid4().hex[:8]
+            upload_target_path = os.path.join('/app/session', f"{filename_no_ext}_{unique_suffix}_converted.mp4")
+            logger.info(f"Converting to MP4: {filepath} -> {upload_target_path}")
+            
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', filepath,
+                '-c', 'copy',
+                '-movflags', '+faststart',
+                upload_target_path
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            try:
+                # 增加 300 秒超时控制，防止坏视频导致 Remux 卡死
+                await asyncio.wait_for(process.communicate(), timeout=300)
+            except asyncio.TimeoutError:
+                logger.error(f"FFmpeg remux timed out for {filepath}")
+                if process:
+                    process.kill()
+                update_upload_status(conn, filepath, 'FAILED')
+                return
+            
+            if process.returncode == 0 and os.path.exists(upload_target_path) and os.path.getsize(upload_target_path) > 0:
+                is_temp_mp4 = True
+            else:
+                logger.error(f"FFmpeg conversion failed for {filepath}. Falling back to uploading the raw file.")
+                if os.path.exists(upload_target_path):
+                    try:
+                        os.remove(upload_target_path)
+                    except Exception:
+                        pass
+                upload_target_path = filepath
+        else:
+            # [竞态防御终极机制] 如果当前处理的是 MP4，我们需要检查它的 TS 版本是否早就被抢救上传过了
+            filename_no_ext = os.path.splitext(os.path.basename(filepath))[0]
+            for ext in ['.ts', '.flv', '.mkv']:
+                raw_file = os.path.join(os.path.dirname(filepath), f"{filename_no_ext}{ext}")
+                if get_upload_status(conn, raw_file) in ('COMPLETED', 'UPLOADING'):
+                    logger.info(f"Race condition averted: Raw counterpart ({ext}) was already rescued and uploaded. Skipping this MP4.")
+                    update_upload_status(conn, filepath, 'SKIPPED_DUPLICATE_MP4')
+                    try:
+                        if os.path.exists(filepath): os.remove(filepath)
+                    except Exception: pass
+                    return
+    
+        thumb_path = await generate_thumbnail(upload_target_path)
+        filename = os.path.basename(filepath)
+        name_without_ext = os.path.splitext(filename)[0]
+        
+        # 作用域初始化
+        chunk_idx = None
+        prefix = None
+        
+        # Parse filename to generate formatted caption
+        
+        # Match pattern: SourceName_YYYY-MM-DDTHH_MM_SS
+        iso_date_match = re.match(r'^(.*?)([0-9]{4}-[0-9]{2}-[0-9]{2})T(.*)$', name_without_ext)
+        
+        if iso_date_match:
+            source_name = iso_date_match.group(1)
+            date_str = iso_date_match.group(2)
+            t_parts = iso_date_match.group(3).split('_')
+            time_str = ':'.join(t_parts[:3])
+            
+            if len(t_parts) > 3 and t_parts[-1].isdigit():
+                chunk_idx = t_parts[-1]
+                prefix = f"{source_name}{date_str}T{'_'.join(t_parts[:-1])}_"
+                
+                dir_path = os.path.dirname(filepath)
+                sibling_files = [f for f in os.listdir(dir_path) if f.startswith(prefix) and f.endswith(('.mp4', '.ts', '.flv', '.mkv'))]
+                
+                if chunk_idx == "000":
+                    has_uploaded_siblings = (get_upload_message_id(conn, f"{prefix}%") is not None)
+                    if len(sibling_files) > 1 or has_uploaded_siblings:
+                        caption_text = f"{source_name} {date_str} {time_str} {chunk_idx}"
+                    else:
+                        caption_text = f"{source_name} {date_str} {time_str}"
+                else:
+                    caption_text = f"{source_name} {date_str} {time_str} {chunk_idx}"
+            else:
+                caption_text = f"{source_name} {date_str} {time_str}"
+        else:
+            parts = name_without_ext.split('_')
+            
+            if len(parts) >= 4 and parts[-1].isdigit():
+                # Match pattern: SourceName_YYYY-MM-DD_HH-MM-SS_idx.mp4
+                chunk_idx = parts[-1]
+                time_str = parts[-2].replace('-', ':')
+                date_str = parts[-3]
+                source_name = '_'.join(parts[:-3])
+                
+                dir_path = os.path.dirname(filepath)
+                prefix = f"{source_name}_{parts[-3]}_{parts[-2]}_"
+                sibling_files = [f for f in os.listdir(dir_path) if f.startswith(prefix) and f.endswith(('.mp4', '.ts', '.flv', '.mkv'))]
+                
+                if chunk_idx == "000":
+                    has_uploaded_siblings = (get_upload_message_id(conn, f"{prefix}%") is not None)
+                    if len(sibling_files) > 1 or has_uploaded_siblings:
+                        caption_text = f"{source_name} {date_str} {time_str} {chunk_idx}"
+                    else:
+                        caption_text = f"{source_name} {date_str} {time_str}"
+                else:
+                    caption_text = f"{source_name} {date_str} {time_str} {chunk_idx}"
+                    
+            elif len(parts) >= 3:
+                # Match legacy pattern: SourceName_YYYY-MM-DD_HH-MM-SS.mp4
+                time_str = parts[-1].replace('-', ':')
+                date_str = parts[-2]
+                source_name = '_'.join(parts[:-2])
+                caption_text = f"{source_name} {date_str} {time_str}"
+                
+            else:
+                # 非预期格式视频直接使用原文件名
+                caption_text = name_without_ext
+        
+        try:
+            # 获取视频长宽和时长元数据
+            v_width, v_height, v_duration = await get_video_attributes(upload_target_path)
+            video_attr = DocumentAttributeVideo(
+                duration=v_duration,
+                w=v_width,
+                h=v_height,
+                supports_streaming=True
+            )
+            
+            # --- 新的原生分块并发加速上传逻辑 (FastTelethon Multi-Connection) ---
+            from fast_telethon import upload_file as fast_upload
+            file_size = os.path.getsize(upload_target_path)
+            if file_size == 0:
+                raise ValueError(f"Target file {upload_target_path} is 0 bytes. Refusing to upload.")
+                
+            logger.info(f"Starting FastTelethon parallel upload: size={file_size}")
+            
+            with open(upload_target_path, 'rb') as f:
+                # 因为已经在最外层拿到了 semaphore，所以这里不需要再获取了，直接全速并发上传即可
+                input_file = await fast_upload(client, f)
+                
+            if not is_running:
+                return
+                
+            logger.info(f"All parts uploaded via FastTelethon. Assembling final message...")
+            
+            # 将原始的文件名覆盖到 input_file 上，确保展示为整洁的名字
+            clean_filename = f"{name_without_ext}.mp4"
+            input_file.name = clean_filename
+            
+            # 使用组装好的 input_file 发送最终消息（此时不再走网络上传大流，只是发送元数据和拼装指令）
+            uploaded_msg_id = None
+            while is_running:
+                try:
+                    final_msg = await client.send_file(
+                        CHANNEL_ID,
+                        file=input_file,
+                        thumb=thumb_path,
+                        caption=caption_text,
+                        attributes=[video_attr]
+                    )
+                    if final_msg:
+                        uploaded_msg_id = final_msg.id
+                    break  # 上传成功，跳出循环
+                    
+                except FloodWaitError as e:
+                    wait_time = e.seconds + 5
+                    logger.warning(f"Telegram API Rate Limit on final send_file. Sleeping for {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                except Exception as inner_e:
+                    logger.error(f"Error during final file transmission: {inner_e}")
+                    raise inner_e
+                    
+            if is_running:
+                update_upload_status(conn, filepath, 'COMPLETED', uploaded_msg_id)
+                logger.info(f"Upload COMPLETED: {filepath}")
+                
+                # ====== Cascade Edit ======
+                if chunk_idx is not None and chunk_idx != "000" and chunk_idx.isdigit():
+                    zero_chunk_msg_id = get_upload_message_id(conn, f"{prefix}000")
+                    if zero_chunk_msg_id:
+                        new_caption = f"{source_name} {date_str} {time_str} 000"
+                        try:
+                            await client.edit_message(CHANNEL_ID, zero_chunk_msg_id, new_caption)
+                            logger.info(f"Cascade edit successful: fixed caption for chunk 000 (msg_id {zero_chunk_msg_id}) to '{new_caption}'")
+                        except Exception as edit_e:
+                            logger.warning(f"Cascade edit failed for chunk 000 (msg_id {zero_chunk_msg_id}): {edit_e}")
+                            
+                # ====== 阅后即焚接管 (Auto-Cleanup) ======
+                try:
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                        logger.info(f"Source file auto-cleaned: {filepath}")
+                        
+                    # 如果当前处理的是 MP4，为了防止之前的 TS/FLV 残留，顺手补一刀
+                    if filepath.lower().endswith('.mp4'):
+                        filename_no_ext = os.path.splitext(os.path.basename(filepath))[0]
+                        for ext in ['.ts', '.flv', '.mkv']:
+                            raw_file = os.path.join(os.path.dirname(filepath), f"{filename_no_ext}{ext}")
+                            if os.path.exists(raw_file):
+                                os.remove(raw_file)
+                                logger.info(f"Residual raw file auto-cleaned: {raw_file}")
+                                
+                    # ====== 级联空文件夹清理 (Empty Directory Pruning) ======
+                    # 当文件被删除后，递归检查父目录。如果父目录空了，就把它也删掉，防止海量空文件夹残留。
+                    # 终止条件是到达了设置的 WATCH_DIR 根目录。
+                    dir_path = os.path.dirname(filepath)
+                    watch_dir_abs_list = [os.path.abspath(d.strip()) for d in WATCH_DIR.split(',') if d.strip()]
+                    while dir_path and os.path.abspath(dir_path) not in watch_dir_abs_list:
+                        try:
+                            if not os.listdir(dir_path):
+                                os.rmdir(dir_path)
+                                logger.info(f"Empty directory auto-cleaned: {dir_path}")
+                                dir_path = os.path.dirname(dir_path)
+                            else:
+                                break  # 目录不为空，说明还有别的视频，停止清理
+                        except Exception as e:
+                            logger.warning(f"Could not remove directory {dir_path}: {e}")
+                            break
+                            
+                except Exception as del_e:
+                    logger.error(f"Failed to auto-clean source files for {filepath}: {del_e}")
+            
+        except Exception as e:
+            logger.error(f"Failed to upload {filepath}: {e}", exc_info=True)
+            update_upload_status(conn, filepath, 'FAILED')
+        finally:
+            # 清理临时生成的封面图
+            if thumb_path and os.path.exists(thumb_path):
+                os.remove(thumb_path)
+            # 清理临时转封装生成的 MP4 文件释放空间
+            if is_temp_mp4 and os.path.exists(upload_target_path):
+                os.remove(upload_target_path)
+
+async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
+    """目录非阻塞雷达轮询与智能并发任务调度主循环"""
+    watch_dir_list = [Path(d.strip()) for d in WATCH_DIR.split(',') if d.strip()]
+    
+    # 状态机：记录所有发现文件的 [大小, 修改时间, 稳定次数]
+    file_stats = {}
+    # 状态机：记录当前正在后台执行的上传任务
+    active_upload_tasks = {}
+    # 全局并发锁：将系统总并发发车数锁死在 1（因为 FastTelethon 单文件已使用了 15 个底层并发连接，足以跑满带宽）
+    global_semaphore = asyncio.Semaphore(1)
+    
+    while is_running:
+        try:
+            # 递归获取所有支持的视频文件
+            all_files = []
+            for w_dir in watch_dir_list:
+                if w_dir.exists():
+                    all_files.extend(list(w_dir.rglob('*.mp4')) + list(w_dir.rglob('*.ts')) + list(w_dir.rglob('*.flv')) + list(w_dir.rglob('*.mkv')))
+            current_files = set()
+            
+            # --- Phase 1: Radar Scan ---
+            for filepath in all_files:
+                path_str = str(filepath)
+                # Ignore hidden or temporary files
+                if filepath.name.startswith('.') or filepath.name.endswith('.tmp'):
+                    continue
+                    
+                status = get_upload_status(conn, path_str)
+                # Skip completed or explicitly skipped files
+                if status in ('COMPLETED', 'SKIPPED_FOR_NATIVE_MP4', 'SKIPPED_DUPLICATE_MP4', 'SKIPPED_EMPTY_FILE', 'SKIPPED_FOR_SPLIT'):
+                    continue
+                # Skip if already in active background tasks
+                if path_str in active_upload_tasks:
+                    continue
+                    
+                current_files.add(path_str)
+                try:
+                    stat = os.stat(path_str)
+                    c_size, c_mtime = stat.st_size, stat.st_mtime
+                    if path_str not in file_stats:
+                        file_stats[path_str] = {'size': c_size, 'mtime': c_mtime, 'stable_count': 0}
+                    else:
+                        if c_size == file_stats[path_str]['size'] and c_mtime == file_stats[path_str]['mtime']:
+                            file_stats[path_str]['stable_count'] += 1
+                        else:
+                            file_stats[path_str] = {'size': c_size, 'mtime': c_mtime, 'stable_count': 0}
+                except FileNotFoundError:
+                    if path_str in file_stats:
+                        del file_stats[path_str]
+            
+            # Cleanup ghost files that disappeared from disk
+            for path_str in list(file_stats.keys()):
+                if path_str not in current_files:
+                    del file_stats[path_str]
+                    
+            # --- Phase 2: Sequential Scheduler (Group-based) ---
+            groups = {}
+            for path_str in current_files:
+                filename = os.path.basename(path_str)
+                name_without_ext = os.path.splitext(filename)[0]
+                parts = name_without_ext.split('_')
+                
+                # Extract prefix (representing a single stream session) and chunk index
+                if len(parts) >= 4 and parts[-1].isdigit():
+                    prefix = '_'.join(parts[:-1])
+                    idx = int(parts[-1])
+                else:
+                    prefix = name_without_ext
+                    idx = 0
+                    
+                if prefix not in groups:
+                    groups[prefix] = []
+                groups[prefix].append({'path': path_str, 'idx': idx})
+                
+            # Sort groups by prefix (which includes date) to ensure chronological uploads
+            for prefix, files in sorted(groups.items(), key=lambda x: x[0]):
+                if not is_running:
+                    break
+                    
+                # --- Group-Level Stability Logic ---
+                has_ts = any(f['path'].lower().endswith(('.ts', '.flv', '.mkv')) for f in files)
+                has_mp4 = any(f['path'].lower().endswith('.mp4') for f in files)
+                
+                if has_ts and has_mp4:
+                    # Mixed phase: Recorder might be slowly converting TS to MP4.
+                    # Grant an extended 15-minute grace period to prevent stealing the file.
+                    group_required_stable = 90
+                elif has_ts and not has_mp4:
+                    # Raw phase: Currently recording, or conversion hasn't started.
+                    group_required_stable = 90
+                else:
+                    # Finished phase: Only MP4s exist.
+                    # Grant a short 30-second grace period for disk sync.
+                    group_required_stable = 3
+                    
+                # Check if ALL files in this group have reached their stability threshold
+                is_group_completely_stable = all(file_stats[f['path']]['stable_count'] >= group_required_stable for f in files)
+                if not is_group_completely_stable:
+                    continue
+                    
+                # Check if this group already has a file currently uploading
+                is_group_busy = False
+                for active_path in active_upload_tasks.keys():
+                    filename = os.path.basename(active_path)
+                    name_without_ext = os.path.splitext(filename)[0]
+                    a_parts = name_without_ext.split('_')
+                    a_prefix = '_'.join(a_parts[:-1]) if (len(a_parts) >= 4 and a_parts[-1].isdigit()) else name_without_ext
+                    if a_prefix == prefix:
+                        is_group_busy = True
+                        break
+                        
+                if is_group_busy:
+                    # 前序切片正在上传，后序切片静默等待
+                    continue
+                    
+                # 找出本组内当前序号最小的文件
+                min_file = min(files, key=lambda x: x['idx'])
+                
+                logger.info(f"Dispatching task: {min_file['path']} (Group: {prefix}, Index: {min_file['idx']})")
+                # 启动后台独立上传协程
+                task = asyncio.create_task(upload_file(client, min_file['path'], conn, global_semaphore))
+                active_upload_tasks[min_file['path']] = task
+                
+                # 注册回调：上传结束（成功或失败）后，从活动字典中移除，释放组通道
+                def _make_callback(p):
+                    def _callback(t):
+                        if p in active_upload_tasks:
+                            del active_upload_tasks[p]
+                    return _callback
+                task.add_done_callback(_make_callback(min_file['path']))
+                
+                
+        except asyncio.CancelledError:
+            logger.info("Radar scan cancelled. Waiting for active upload tasks to finish gracefully...")
+            if active_upload_tasks:
+                await asyncio.gather(*active_upload_tasks.values(), return_exceptions=True)
+            raise
+        except Exception as e:
+            logger.error(f"Error during directory scan: {e}", exc_info=True)
+            
+        if is_running:
+            # --- 全局空文件夹修剪 (Global Empty Directory Pruning) ---
+            # 无论什么原因产生的空文件夹，每 10 秒都会被自底向上彻底抹除
+            for w_dir in watch_dir_list:
+                try:
+                    if not w_dir.exists():
+                        continue
+                    watch_dir_abs = str(w_dir.resolve())
+                    for root_dir, dirs, files in os.walk(watch_dir_abs, topdown=False):
+                        if root_dir == watch_dir_abs:
+                            continue
+                        if not os.listdir(root_dir):
+                            try:
+                                os.rmdir(root_dir)
+                                logger.info(f"Global pruning: Removed empty directory {root_dir}")
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.warning(f"Global pruning error for {w_dir}: {e}")
+                
+            await asyncio.sleep(10)  # 雷达每 10 秒扫一次
+
+# ---------------- 主干程序 ----------------
+async def main():
+    logger.info("Initializing SQLite database...")
+    conn = init_db()
+    
+    # 垃圾清理：清理上次异常崩溃可能遗留的临时转换文件和封面图
+    logger.info("Cleaning up any orphaned temporary files...")
+    for temp_dir in ['/app/session', '/tmp']:
+        if os.path.exists(temp_dir):
+            for file in os.listdir(temp_dir):
+                if file.endswith('_converted.mp4') or file.endswith('.thumb.jpg'):
+                    try:
+                        os.remove(os.path.join(temp_dir, file))
+                    except Exception as e:
+                        logger.warning(f"Failed to remove orphaned temp file {file}: {e}")
+    
+    logger.info("Starting Telegram Client...")
+    
+    # 构造代理配置
+    proxy = None
+    if PROXY_TYPE and PROXY_HOST and PROXY_PORT:
+        proxy = {
+            'proxy_type': PROXY_TYPE.lower(), # 'http' or 'socks5'
+            'addr': PROXY_HOST,
+            'port': int(PROXY_PORT)
+        }
+        logger.info(f"Using proxy: {PROXY_TYPE}://{PROXY_HOST}:{PROXY_PORT}")
+
+    # 结合 Premium，开启 auto_reconnect 与无限制重试，并自定义设备名称
+    client = TelegramClient(
+        SESSION_NAME, 
+        API_ID, 
+        API_HASH, 
+        connection_retries=None, 
+        auto_reconnect=True,
+        device_model=DEVICE_MODEL,
+        system_version=SYSTEM_VERSION,
+        app_version=APP_VERSION,
+        proxy=proxy
+    )
+    
+    await client.start()
+    logger.info("Telegram Client started successfully.")
+    
+    # 将扫描任务投入事件循环
+    upload_task = asyncio.create_task(scan_and_upload(client, conn))
+    
+    # 阻塞主线程，直到收到终止信号
+    while is_running:
+        await asyncio.sleep(1)
+        
+    logger.info("Termination signal received. Waiting for active upload slice to flush safely...")
+    
+    # 取消当前任务（如果在睡眠阶段会抛出 CancelledError，如果在上传中会在当前块传完后中断）
+    upload_task.cancel()
+    try:
+        await upload_task
+    except asyncio.CancelledError:
+        pass
+        
+    logger.info("Disconnecting Telegram Client gracefully...")
+    await client.disconnect()
+    
+    logger.info("Closing SQLite database connection...")
+    conn.close()
+    logger.info("Graceful shutdown completed successfully.")
+
+if __name__ == '__main__':
+    # 确保环境变量都配齐了
+    if not all([API_ID, API_HASH, CHANNEL_ID]):
+        logger.error("Missing critical environment variables: API_ID, API_HASH or CHANNEL_ID.")
+        exit(1)
+        
+    asyncio.run(main())
