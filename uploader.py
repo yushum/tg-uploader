@@ -555,7 +555,7 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
     file_stats = {}
     # 状态机：记录当前正在后台执行的上传任务
     active_upload_tasks = {}
-    # 全局并发锁：将系统总并发发车数锁死在 1（因为 FastTelethon 单文件已使用了 15 个底层并发连接，足以跑满带宽）
+    # 全局并发锁：将系统总并发发车数锁死在 1（因为 FastTelethon 单文件已使用了 20 个底层并发连接，足以跑满带宽）
     global_semaphore = asyncio.Semaphore(1)
     
     while is_running:

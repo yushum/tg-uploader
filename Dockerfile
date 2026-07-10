@@ -1,10 +1,10 @@
 FROM python:3.14-slim
 
-# 设置时区和非交互模式
+# Set timezone and non-interactive mode
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Shanghai
 
-# 安装 FFmpeg 以及编译 cryptg 所需的依赖环境
+# Install FFmpeg and dependencies for compiling cryptg
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     gcc \
@@ -15,12 +15,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 先拷贝依赖文件并安装，利用 Docker 缓存层加速构建
+# Copy dependencies and install to utilize Docker cache layers
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 拷贝核心业务脚本
+# Copy application code
 COPY *.py .
 
-# 容器启动命令
+# Container startup command
 CMD ["python", "uploader.py"]

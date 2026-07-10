@@ -6,7 +6,7 @@ An industrial-grade, fully automated, and extremely fast video uploader for Tele
 
 ## 🚀 Key Features
 
-*   **Multi-Connection FastTelethon Uploads**: Bypasses Telegram's single-connection bandwidth limit by slicing files in memory and uploading via 15 parallel MTProto connections. Reaches dozens of MB/s on good networks.
+*   **Multi-Connection FastTelethon Uploads**: Bypasses Telegram's single-connection bandwidth limit by slicing files in memory and uploading via 20 parallel MTProto connections. Reaches dozens of MB/s on good networks.
 *   **Automatic 4GB+ File Splitting**: Telegram limits file uploads to 4GB (with Premium). This script seamlessly and losslessly splits any video larger than 4GB into chunks using `ffmpeg` without re-encoding, and uploads them consecutively.
 *   **Auto-Remux for Stream Formats**: Automatically converts `.ts`, `.flv`, and `.mkv` files to `.mp4` instantly. Injects `+faststart` MOOV atoms so videos can be streamed directly in Telegram without waiting for a full download.
 *   **Non-Blocking Radar & Sequential Scheduler**: Scans the filesystem asynchronously. Groups video chunks together, respects customizable stability timeout periods (to prevent reading incomplete files while they are still being recorded), and uploads them in perfect chronological order.

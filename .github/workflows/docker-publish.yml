@@ -3,9 +3,17 @@ name: Docker Image CI
 on:
   push:
     branches: [ "main", "master" ]
+    paths:
+      - '**.py'
+      - 'Dockerfile'
+      - 'requirements.txt'
     tags: [ 'v*.*.*' ]
   pull_request:
     branches: [ "main", "master" ]
+    paths:
+      - '**.py'
+      - 'Dockerfile'
+      - 'requirements.txt'
 
 jobs:
   build:
