@@ -138,6 +138,11 @@ async def generate_thumbnail(video_path: str) -> str:
         logger.error(f"FFmpeg thumbnail generation timed out for {video_path}")
         if process:
             process.kill()
+    except asyncio.CancelledError:
+        if process:
+            try: process.kill()
+            except Exception: pass
+        raise
     except Exception as e:
         logger.error(f"Failed to generate thumbnail for {video_path}: {e}")
         
@@ -158,15 +163,27 @@ async def get_video_attributes(video_path: str):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        # 增加 30 秒超时控制，防止 ffprobe 僵死
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
-        info = json.loads(stdout)
-        
-        width = int(info.get('streams', [{}])[0].get('width', 0))
-        height = int(info.get('streams', [{}])[0].get('height', 0))
-        duration = int(float(info.get('format', {}).get('duration', 0)))
-        
-        return width, height, duration
+        try:
+            # 增加 30 秒超时控制，防止 ffprobe 僵死
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
+            info = json.loads(stdout)
+            
+            width = int(info.get('streams', [{}])[0].get('width', 0))
+            height = int(info.get('streams', [{}])[0].get('height', 0))
+            duration = int(float(info.get('format', {}).get('duration', 0)))
+            
+            return width, height, duration
+        except asyncio.TimeoutError:
+            logger.error(f"ffprobe timed out for {video_path}")
+            if process:
+                try: process.kill()
+                except Exception: pass
+            return 0, 0, 0
+        except asyncio.CancelledError:
+            if process:
+                try: process.kill()
+                except Exception: pass
+            raise
     except Exception as e:
         logger.error(f"Failed to extract video attributes for {video_path}: {e}")
         return 0, 0, 0
@@ -204,102 +221,26 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 logger.warning(f"Cleanup for 0-byte file failed: {e}")
             return
             
-        # [超大文件切割预处理]
-        file_size_bytes = os.path.getsize(filepath)
-        max_size_bytes = MAX_SPLIT_SIZE_MB * 1024 * 1024
-        
-        if file_size_bytes > max_size_bytes:
-            logger.info(f"File {filepath} exceeds limit ({file_size_bytes} > {max_size_bytes} bytes). Initiating lossless split...")
-            _, _, duration = await get_video_attributes(filepath)
-            if duration > 0:
-                bytes_per_sec = file_size_bytes / duration
-                # 预留 2% 安全余量
-                target_seconds = math.floor((max_size_bytes * 0.98) / bytes_per_sec)
-                
-                if target_seconds > 0:
-                    filename = os.path.basename(filepath)
-                    name_without_ext, _ = os.path.splitext(filename)
-                    dir_path = os.path.dirname(filepath)
-                    
-                    parts = name_without_ext.split('_')
-                    
-                    current_start = 0
-                    part_idx = 0
-                    split_failed = False
-                    
-                    while current_start < duration:
-                        if len(parts) >= 4 and parts[-1].isdigit():
-                            # 已有切片编号，直接追加位数（例如 001 变成 00100, 00101）
-                            output_file = os.path.join(dir_path, f"{name_without_ext}{part_idx:02d}.mp4")
-                        else:
-                            # 没有切片编号，直接按标准格式附加 _000, _001
-                            output_file = os.path.join(dir_path, f"{name_without_ext}_{part_idx:03d}.mp4")
-                            
-                        cmd = [
-                            'ffmpeg', '-y',
-                            '-ss', str(current_start),
-                            '-i', filepath,
-                            '-t', str(target_seconds),
-                            '-c', 'copy',
-                            '-movflags', '+faststart',
-                            output_file
-                        ]
-                        logger.info(f"Splitting part {part_idx} (start={current_start}s, target={target_seconds}s): {cmd}")
-                        
-                        process = await asyncio.create_subprocess_exec(
-                            *cmd,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.DEVNULL
-                        )
-                        try:
-                            await asyncio.wait_for(process.communicate(), timeout=300)
-                        except asyncio.TimeoutError:
-                            logger.error(f"FFmpeg split timed out at part {part_idx} for {filepath}")
-                            if process: process.kill()
-                            split_failed = True
-                            break
-                            
-                        if process.returncode != 0:
-                            # 如果是因为到达文件末尾导致的小数点精度问题，忽略该错误
-                            if not os.path.exists(output_file) or os.path.getsize(output_file) < 1024:
-                                try: os.remove(output_file)
-                                except: pass
-                            else:
-                                logger.error(f"FFmpeg split failed at part {part_idx} with code {process.returncode}")
-                                split_failed = True
-                                break
-                        else:
-                            # 清理可能生成的极小空文件
-                            if os.path.exists(output_file) and os.path.getsize(output_file) < 1024:
-                                try: os.remove(output_file)
-                                except: pass
-                                
-                        current_start += target_seconds
-                        part_idx += 1
-                        
-                    if not split_failed:
-                        logger.info(f"Manual split successful for {filepath}. Removed original huge file and yielding to radar.")
-                        update_upload_status(conn, filepath, 'SKIPPED_FOR_SPLIT')
-                        try:
-                            os.remove(filepath)
-                        except Exception as e:
-                            logger.warning(f"Failed to remove original huge file {filepath}: {e}")
-                        return
-                    else:
-                        update_upload_status(conn, filepath, 'FAILED')
-                        return
-            else:
-                logger.warning(f"Could not get duration for {filepath}, cannot split. Proceeding with raw upload (will likely fail at Telegram API).")
-                
         update_upload_status(conn, filepath, 'UPLOADING')
         
         is_temp_mp4 = False
         upload_target_path = filepath
         thumb_path = None
         
-        if filepath.lower().endswith(('.ts', '.flv', '.mkv')):
-            filename_no_ext = os.path.splitext(os.path.basename(filepath))[0]
-            
+        # [竞态防御终极机制]
+        filename_no_ext = os.path.splitext(os.path.basename(filepath))[0]
+        if not filepath.lower().endswith(('.ts', '.flv', '.mkv')):
+            # 处理的是原生 MP4，检查是否有原始 TS 已经被上传过
+            for ext in ['.ts', '.flv', '.mkv']:
+                raw_file = os.path.join(os.path.dirname(filepath), f"{filename_no_ext}{ext}")
+                if get_upload_status(conn, raw_file) in ('COMPLETED', 'UPLOADING'):
+                    logger.info(f"Race condition averted: Raw counterpart ({ext}) was already rescued and uploaded. Skipping this MP4.")
+                    update_upload_status(conn, filepath, 'SKIPPED_DUPLICATE_MP4')
+                    try:
+                        if os.path.exists(filepath): os.remove(filepath)
+                    except Exception: pass
+                    return
+        else:
             # [竞态防御机制] 检查对应的 MP4 文件是否已经存在，或已经被成功上传
             possible_mp4 = os.path.join(os.path.dirname(filepath), f"{filename_no_ext}.mp4")
             if os.path.exists(possible_mp4) or get_upload_status(conn, possible_mp4) in ('COMPLETED', 'UPLOADING'):
@@ -335,32 +276,126 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
             except asyncio.TimeoutError:
                 logger.error(f"FFmpeg remux timed out for {filepath}")
                 if process:
-                    process.kill()
+                    try: process.kill()
+                    except: pass
                 update_upload_status(conn, filepath, 'FAILED')
                 return
+            except asyncio.CancelledError:
+                if process:
+                    try: process.kill()
+                    except: pass
+                raise
             
             if process.returncode == 0 and os.path.exists(upload_target_path) and os.path.getsize(upload_target_path) > 0:
                 is_temp_mp4 = True
             else:
                 logger.error(f"FFmpeg conversion failed for {filepath}. Falling back to uploading the raw file.")
                 if os.path.exists(upload_target_path):
-                    try:
-                        os.remove(upload_target_path)
-                    except Exception:
-                        pass
+                    try: os.remove(upload_target_path)
+                    except: pass
                 upload_target_path = filepath
-        else:
-            # [竞态防御终极机制] 如果当前处理的是 MP4，我们需要检查它的 TS 版本是否早就被抢救上传过了
-            filename_no_ext = os.path.splitext(os.path.basename(filepath))[0]
-            for ext in ['.ts', '.flv', '.mkv']:
-                raw_file = os.path.join(os.path.dirname(filepath), f"{filename_no_ext}{ext}")
-                if get_upload_status(conn, raw_file) in ('COMPLETED', 'UPLOADING'):
-                    logger.info(f"Race condition averted: Raw counterpart ({ext}) was already rescued and uploaded. Skipping this MP4.")
-                    update_upload_status(conn, filepath, 'SKIPPED_DUPLICATE_MP4')
-                    try:
-                        if os.path.exists(filepath): os.remove(filepath)
-                    except Exception: pass
-                    return
+                is_temp_mp4 = False
+
+        # [超大文件切割预处理] - 此时使用转换后的 upload_target_path，它应该是拥有正确时间戳的健康的 mp4
+        file_size_bytes = os.path.getsize(upload_target_path)
+        max_size_bytes = MAX_SPLIT_SIZE_MB * 1024 * 1024
+        
+        if file_size_bytes > max_size_bytes:
+            logger.info(f"File {upload_target_path} exceeds limit ({file_size_bytes} > {max_size_bytes} bytes). Initiating lossless split...")
+            _, _, duration = await get_video_attributes(upload_target_path)
+            if duration > 0:
+                bytes_per_sec = file_size_bytes / duration
+                target_seconds = math.floor((max_size_bytes * 0.95) / bytes_per_sec)
+                
+                # Safeguard: clamp target_seconds 绝对防止切割出超过原始文件大小的整块导致死循环
+                if target_seconds < 60:
+                    logger.warning(f"Calculated target_seconds {target_seconds} is too low. Clamping to 60s.")
+                    target_seconds = 60
+                elif target_seconds > duration * 0.95:
+                    target_seconds = math.floor(duration * 0.95)
+                    logger.warning(f"Calculated target_seconds was too high. Clamping to {target_seconds}s.")
+                
+                if target_seconds > 0:
+                    # 分块文件的存放目录，必须放回原始视频所在的监控目录 dir_path，雷达才能扫描到！
+                    dir_path = os.path.dirname(filepath)
+                    filename = os.path.basename(filepath)
+                    original_name_without_ext = os.path.splitext(filename)[0]
+                    parts = original_name_without_ext.split('_')
+                    
+                    current_start = 0
+                    part_idx = 0
+                    split_failed = False
+                    
+                    while current_start < duration:
+                        if len(parts) >= 4 and parts[-1].isdigit():
+                            output_file = os.path.join(dir_path, f"{original_name_without_ext}{part_idx:02d}.mp4")
+                        else:
+                            output_file = os.path.join(dir_path, f"{original_name_without_ext}_{part_idx:03d}.mp4")
+                            
+                        cmd = [
+                            'ffmpeg', '-y',
+                            '-ss', str(current_start),
+                            '-i', upload_target_path,
+                            '-t', str(target_seconds),
+                            '-c', 'copy',
+                            '-movflags', '+faststart',
+                            output_file
+                        ]
+                        logger.info(f"Splitting part {part_idx} (start={current_start}s, target={target_seconds}s): {cmd}")
+                        
+                        process = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL
+                        )
+                        try:
+                            await asyncio.wait_for(process.communicate(), timeout=300)
+                        except asyncio.TimeoutError:
+                            logger.error(f"FFmpeg split timed out at part {part_idx} for {upload_target_path}")
+                            if process:
+                                try: process.kill()
+                                except: pass
+                            split_failed = True
+                            break
+                        except asyncio.CancelledError:
+                            if process:
+                                try: process.kill()
+                                except: pass
+                            raise
+                            
+                        if process.returncode != 0:
+                            if not os.path.exists(output_file) or os.path.getsize(output_file) < 1024:
+                                try: os.remove(output_file)
+                                except: pass
+                            else:
+                                logger.error(f"FFmpeg split failed at part {part_idx} with code {process.returncode}")
+                                split_failed = True
+                                break
+                        else:
+                            if os.path.exists(output_file) and os.path.getsize(output_file) < 1024:
+                                try: os.remove(output_file)
+                                except: pass
+                                
+                        current_start += target_seconds
+                        part_idx += 1
+                        
+                    if not split_failed:
+                        logger.info(f"Manual split successful for {filepath}. Removed original and yielding to radar.")
+                        update_upload_status(conn, filepath, 'SKIPPED_FOR_SPLIT')
+                        try: os.remove(filepath)
+                        except Exception: pass
+                        if is_temp_mp4 and os.path.exists(upload_target_path):
+                            try: os.remove(upload_target_path)
+                            except Exception: pass
+                        return
+                    else:
+                        update_upload_status(conn, filepath, 'FAILED')
+                        if is_temp_mp4 and os.path.exists(upload_target_path):
+                            try: os.remove(upload_target_path)
+                            except Exception: pass
+                        return
+            else:
+                logger.warning(f"Could not get duration for {upload_target_path}, cannot split. Proceeding with raw upload.")
     
         thumb_path = await generate_thumbnail(upload_target_path)
         filename = os.path.basename(filepath)
@@ -593,7 +628,8 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
                             file_stats[path_str]['stable_count'] += 1
                         else:
                             file_stats[path_str] = {'size': c_size, 'mtime': c_mtime, 'stable_count': 0}
-                except FileNotFoundError:
+                except OSError as stat_e:
+                    logger.debug(f"Could not stat {path_str}: {stat_e}")
                     if path_str in file_stats:
                         del file_stats[path_str]
             
@@ -680,8 +716,10 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
                 
                 
         except asyncio.CancelledError:
-            logger.info("Radar scan cancelled. Waiting for active upload tasks to finish gracefully...")
+            logger.info("Radar scan cancelled. Terminating active upload tasks...")
             if active_upload_tasks:
+                for task in active_upload_tasks.values():
+                    task.cancel()
                 await asyncio.gather(*active_upload_tasks.values(), return_exceptions=True)
             raise
         except Exception as e:

@@ -105,7 +105,10 @@ class UploadSender:
 
     async def disconnect(self) -> None:
         if self.previous:
-            await self.previous
+            try:
+                await self.previous
+            except Exception as e:
+                log.error(f"Background upload task failed during disconnect: {e}")
         return await self.sender.disconnect()
 
 
@@ -128,7 +131,7 @@ class ParallelTransferrer:
 
     async def _cleanup(self) -> None:
         if self.senders:
-            await asyncio.gather(*[sender.disconnect() for sender in self.senders])
+            await asyncio.gather(*[sender.disconnect() for sender in self.senders], return_exceptions=True)
             self.senders = None
 
     @staticmethod
@@ -261,29 +264,32 @@ async def _internal_transfer_to_telegram(client: TelegramClient,
     part_size, part_count, is_large = await uploader.init_upload(file_id, file_size, part_size_kb=512)
     buffer = bytearray()
     
-    # We read 512KB directly so we don't need small buffer concat overhead mostly
-    for data in stream_file(response, chunk_size=part_size):
-        if progress_callback:
-            r = progress_callback(response.tell(), file_size)
-            if inspect.isawaitable(r):
-                await r
-        if not is_large:
-            hash_md5.update(data)
-        if len(buffer) == 0 and len(data) == part_size:
-            await uploader.upload(data)
-            continue
-        new_len = len(buffer) + len(data)
-        if new_len >= part_size:
-            cutoff = part_size - len(buffer)
-            buffer.extend(data[:cutoff])
+    try:
+        # We read 512KB directly so we don't need small buffer concat overhead mostly
+        for data in stream_file(response, chunk_size=part_size):
+            if progress_callback:
+                r = progress_callback(response.tell(), file_size)
+                if inspect.isawaitable(r):
+                    await r
+            if not is_large:
+                hash_md5.update(data)
+            if len(buffer) == 0 and len(data) == part_size:
+                await uploader.upload(data)
+                continue
+            new_len = len(buffer) + len(data)
+            if new_len >= part_size:
+                cutoff = part_size - len(buffer)
+                buffer.extend(data[:cutoff])
+                await uploader.upload(bytes(buffer))
+                buffer.clear()
+                buffer.extend(data[cutoff:])
+            else:
+                buffer.extend(data)
+        if len(buffer) > 0:
             await uploader.upload(bytes(buffer))
-            buffer.clear()
-            buffer.extend(data[cutoff:])
-        else:
-            buffer.extend(data)
-    if len(buffer) > 0:
-        await uploader.upload(bytes(buffer))
-    await uploader.finish_upload()
+    finally:
+        await uploader.finish_upload()
+        
     if is_large:
         return InputFileBig(file_id, part_count, "upload"), file_size
     else:
