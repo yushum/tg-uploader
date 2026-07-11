@@ -134,9 +134,10 @@ class ParallelTransferrer:
             self.senders = None
 
     @staticmethod
-    def _get_connection_count(file_size: int, max_count: int = 20,
+    def _get_connection_count(file_size: int, max_count: int = 0,
                               full_size: int = 100 * 1024 * 1024) -> int:
-        # max_count 20 allows for massive concurrency on high-bandwidth links
+        if max_count == 0:
+            max_count = int(os.getenv('MAX_CONNECTIONS', '20'))
         if file_size > full_size:
             return max_count
         return math.ceil((file_size / full_size) * max_count)
@@ -267,7 +268,7 @@ async def _internal_transfer_to_telegram(client: TelegramClient,
         # We read 512KB directly so we don't need small buffer concat overhead mostly
         for data in stream_file(response, chunk_size=part_size):
             if progress_callback:
-                r = progress_callback(response.tell(), file_size)
+                r = progress_callback(offset, file_size)
                 if inspect.isawaitable(r):
                     await r
             if not is_large:

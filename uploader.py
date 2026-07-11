@@ -135,13 +135,13 @@ async def generate_thumbnail(video_path: str) -> str:
         if process:
             try:
                 process.kill()
-                await process.wait()
+                await asyncio.wait_for(process.wait(), timeout=2.0)
             except Exception: pass
     except asyncio.CancelledError:
         if process:
             try: 
                 process.kill()
-                await process.wait()
+                await asyncio.wait_for(process.wait(), timeout=2.0)
             except Exception: pass
         raise
     except Exception as e:
@@ -179,14 +179,14 @@ async def get_video_attributes(video_path: str):
             if process:
                 try: 
                     process.kill()
-                    await process.wait()
+                    await asyncio.wait_for(process.wait(), timeout=2.0)
                 except Exception: pass
             return 0, 0, 0
         except asyncio.CancelledError:
             if process:
                 try: 
                     process.kill()
-                    await process.wait()
+                    await asyncio.wait_for(process.wait(), timeout=2.0)
                 except Exception: pass
             raise
     except Exception as e:
@@ -283,7 +283,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 if process:
                     try: 
                         process.kill()
-                        await process.wait()
+                        await asyncio.wait_for(process.wait(), timeout=2.0)
                     except Exception: pass
                 update_upload_status(conn, filepath, 'FAILED')
                 return
@@ -291,7 +291,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 if process:
                     try: 
                         process.kill()
-                        await process.wait()
+                        await asyncio.wait_for(process.wait(), timeout=2.0)
                     except Exception: pass
                 raise
             
@@ -366,7 +366,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             if process:
                                 try: 
                                     process.kill()
-                                    await process.wait()
+                                    await asyncio.wait_for(process.wait(), timeout=2.0)
                                 except Exception: pass
                             split_failed = True
                             break
@@ -374,7 +374,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             if process:
                                 try: 
                                     process.kill()
-                                    await process.wait()
+                                    await asyncio.wait_for(process.wait(), timeout=2.0)
                                 except Exception: pass
                             raise
                             
