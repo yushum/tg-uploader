@@ -1,19 +1,15 @@
 import os
-import time
 import asyncio
 import sqlite3
 import logging
 import signal
-import subprocess
 import re
 import json
-import random
 import math
 from pathlib import Path
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
-from telethon.tl.types import DocumentAttributeVideo, InputFileBig
-from telethon.tl.functions.upload import SaveBigFilePartRequest
+from telethon.tl.types import DocumentAttributeVideo
 
 # ---------------- Configuration ----------------
 API_ID = int(os.getenv('API_ID', '0'))
