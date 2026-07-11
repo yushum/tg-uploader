@@ -791,6 +791,21 @@ async def main():
     await client.start()
     logger.info("Telegram Client started successfully.")
     
+    try:
+        me = await client.get_me()
+        if me:
+            if getattr(me, 'premium', False):
+                logger.info(f"Logged in as {me.first_name} (Premium: Yes). Max upload size remains {MAX_SPLIT_SIZE_MB}MB.")
+            else:
+                global MAX_SPLIT_SIZE_MB
+                if MAX_SPLIT_SIZE_MB > 1950:
+                    logger.warning(f"Logged in as {me.first_name} (Premium: No). Forcing max upload size from {MAX_SPLIT_SIZE_MB}MB down to 1950MB to prevent Telegram server rejection.")
+                    MAX_SPLIT_SIZE_MB = 1950
+                else:
+                    logger.info(f"Logged in as {me.first_name} (Premium: No). Max upload size is {MAX_SPLIT_SIZE_MB}MB.")
+    except Exception as e:
+        logger.warning(f"Could not retrieve user profile to check Premium status: {e}")
+    
     # 将扫描任务投入事件循环
     upload_task = asyncio.create_task(scan_and_upload(client, conn))
     
