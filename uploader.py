@@ -276,15 +276,15 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 stderr=asyncio.subprocess.DEVNULL
             )
             try:
-                # 增加 300 秒超时控制，防止坏视频导致 Remux 卡死
-                await asyncio.wait_for(process.communicate(), timeout=300)
+                # 增加 1800 秒超时控制，防止坏视频导致 Remux 卡死
+                await asyncio.wait_for(process.communicate(), timeout=1800)
             except asyncio.TimeoutError:
                 logger.error(f"FFmpeg remux timed out for {filepath}")
                 if process:
                     try: 
                         process.kill()
                         await process.wait()
-                    except: pass
+                    except Exception: pass
                 update_upload_status(conn, filepath, 'FAILED')
                 return
             except asyncio.CancelledError:
@@ -292,7 +292,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                     try: 
                         process.kill()
                         await process.wait()
-                    except: pass
+                    except Exception: pass
                 raise
             
             if process.returncode == 0 and os.path.exists(upload_target_path) and os.path.getsize(upload_target_path) > 0:
@@ -301,7 +301,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 logger.error(f"FFmpeg conversion failed for {filepath}. Falling back to uploading the raw file.")
                 if os.path.exists(upload_target_path):
                     try: os.remove(upload_target_path)
-                    except: pass
+                    except Exception: pass
                 upload_target_path = filepath
                 is_temp_mp4 = False
 
@@ -360,14 +360,14 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             stderr=asyncio.subprocess.DEVNULL
                         )
                         try:
-                            await asyncio.wait_for(process.communicate(), timeout=300)
+                            await asyncio.wait_for(process.communicate(), timeout=1800)
                         except asyncio.TimeoutError:
                             logger.error(f"FFmpeg split timed out at part {part_idx} for {upload_target_path}")
                             if process:
                                 try: 
                                     process.kill()
                                     await process.wait()
-                                except: pass
+                                except Exception: pass
                             split_failed = True
                             break
                         except asyncio.CancelledError:
@@ -375,13 +375,13 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                                 try: 
                                     process.kill()
                                     await process.wait()
-                                except: pass
+                                except Exception: pass
                             raise
                             
                         if process.returncode != 0:
                             if not os.path.exists(output_file) or os.path.getsize(output_file) < 1024:
                                 try: os.remove(output_file)
-                                except: pass
+                                except Exception: pass
                             else:
                                 logger.error(f"FFmpeg split failed at part {part_idx} with code {process.returncode}")
                                 split_failed = True
@@ -389,7 +389,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                         else:
                             if os.path.exists(output_file) and os.path.getsize(output_file) < 1024:
                                 try: os.remove(output_file)
-                                except: pass
+                                except Exception: pass
                                 
                         current_start += target_seconds
                         part_idx += 1

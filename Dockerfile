@@ -1,12 +1,10 @@
-FROM python:3.14-slim
+# Builder stage
+FROM python:3.14-slim AS builder
 
-# Set timezone and non-interactive mode
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Shanghai
 
-# Install FFmpeg and dependencies for compiling cryptg
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
     gcc \
     python3-dev \
     libffi-dev \
@@ -14,13 +12,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Copy dependencies and install to utilize Docker cache layers
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
 
-# Copy application code
+# Final stage
+FROM python:3.14-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Shanghai
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /app/wheels /wheels
+COPY --from=builder /app/requirements.txt .
+RUN pip install --no-cache /wheels/*
+
 COPY *.py .
 
-# Container startup command
 CMD ["python", "uploader.py"]
