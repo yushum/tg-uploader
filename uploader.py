@@ -773,6 +773,7 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
 
 # ---------------- 主干程序 ----------------
 async def main():
+    global MAX_SPLIT_SIZE_MB
     logger.info("Initializing SQLite database...")
     conn = init_db()
     
@@ -821,7 +822,6 @@ async def main():
             if getattr(me, 'premium', False):
                 logger.info(f"Logged in as {me.first_name} (Premium: Yes). Max upload size remains {MAX_SPLIT_SIZE_MB}MB.")
             else:
-                global MAX_SPLIT_SIZE_MB
                 if MAX_SPLIT_SIZE_MB > 1950:
                     logger.warning(f"Logged in as {me.first_name} (Premium: No). Forcing max upload size from {MAX_SPLIT_SIZE_MB}MB down to 1950MB to prevent Telegram server rejection.")
                     MAX_SPLIT_SIZE_MB = 1950
