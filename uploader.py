@@ -137,10 +137,15 @@ async def generate_thumbnail(video_path: str) -> str:
     except asyncio.TimeoutError:
         logger.error(f"FFmpeg thumbnail generation timed out for {video_path}")
         if process:
-            process.kill()
+            try:
+                process.kill()
+                await process.wait()
+            except Exception: pass
     except asyncio.CancelledError:
         if process:
-            try: process.kill()
+            try: 
+                process.kill()
+                await process.wait()
             except Exception: pass
         raise
     except Exception as e:
@@ -176,12 +181,16 @@ async def get_video_attributes(video_path: str):
         except asyncio.TimeoutError:
             logger.error(f"ffprobe timed out for {video_path}")
             if process:
-                try: process.kill()
+                try: 
+                    process.kill()
+                    await process.wait()
                 except Exception: pass
             return 0, 0, 0
         except asyncio.CancelledError:
             if process:
-                try: process.kill()
+                try: 
+                    process.kill()
+                    await process.wait()
                 except Exception: pass
             raise
     except Exception as e:
@@ -276,13 +285,17 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
             except asyncio.TimeoutError:
                 logger.error(f"FFmpeg remux timed out for {filepath}")
                 if process:
-                    try: process.kill()
+                    try: 
+                        process.kill()
+                        await process.wait()
                     except: pass
                 update_upload_status(conn, filepath, 'FAILED')
                 return
             except asyncio.CancelledError:
                 if process:
-                    try: process.kill()
+                    try: 
+                        process.kill()
+                        await process.wait()
                     except: pass
                 raise
             
@@ -303,7 +316,9 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
         if file_size_bytes > max_size_bytes:
             logger.info(f"File {upload_target_path} exceeds limit ({file_size_bytes} > {max_size_bytes} bytes). Initiating lossless split...")
             _, _, duration = await get_video_attributes(upload_target_path)
-            if duration > 0:
+            if duration > 0 and duration <= 60:
+                logger.warning(f"File {upload_target_path} exceeds limit but duration is only {duration}s. Refusing to split to prevent infinite loop.")
+            elif duration > 60:
                 bytes_per_sec = file_size_bytes / duration
                 target_seconds = math.floor((max_size_bytes * 0.95) / bytes_per_sec)
                 
@@ -311,9 +326,9 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 if target_seconds < 60:
                     logger.warning(f"Calculated target_seconds {target_seconds} is too low. Clamping to 60s.")
                     target_seconds = 60
-                elif target_seconds > duration * 0.95:
+                if target_seconds > duration * 0.95:
                     target_seconds = math.floor(duration * 0.95)
-                    logger.warning(f"Calculated target_seconds was too high. Clamping to {target_seconds}s.")
+                    logger.warning(f"Calculated target_seconds was too high. Clamping down to {target_seconds}s.")
                 
                 if target_seconds > 0:
                     # 分块文件的存放目录，必须放回原始视频所在的监控目录 dir_path，雷达才能扫描到！
@@ -353,13 +368,17 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                         except asyncio.TimeoutError:
                             logger.error(f"FFmpeg split timed out at part {part_idx} for {upload_target_path}")
                             if process:
-                                try: process.kill()
+                                try: 
+                                    process.kill()
+                                    await process.wait()
                                 except: pass
                             split_failed = True
                             break
                         except asyncio.CancelledError:
                             if process:
-                                try: process.kill()
+                                try: 
+                                    process.kill()
+                                    await process.wait()
                                 except: pass
                             raise
                             
@@ -582,6 +601,14 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
             if is_temp_mp4 and os.path.exists(upload_target_path):
                 os.remove(upload_target_path)
 
+def _sync_scan_directories(watch_dir_list):
+    """Helper for running blocking directory scans in a separate thread"""
+    all_files = []
+    for w_dir in watch_dir_list:
+        if w_dir.exists():
+            all_files.extend(list(w_dir.rglob('*.mp4')) + list(w_dir.rglob('*.ts')) + list(w_dir.rglob('*.flv')) + list(w_dir.rglob('*.mkv')))
+    return all_files
+
 async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
     """目录非阻塞雷达轮询与智能并发任务调度主循环"""
     watch_dir_list = [Path(d.strip()) for d in WATCH_DIR.split(',') if d.strip()]
@@ -595,11 +622,8 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
     
     while is_running:
         try:
-            # 递归获取所有支持的视频文件
-            all_files = []
-            for w_dir in watch_dir_list:
-                if w_dir.exists():
-                    all_files.extend(list(w_dir.rglob('*.mp4')) + list(w_dir.rglob('*.ts')) + list(w_dir.rglob('*.flv')) + list(w_dir.rglob('*.mkv')))
+            # 递归获取所有支持的视频文件，放入线程池避免阻塞 Asyncio
+            all_files = await asyncio.to_thread(_sync_scan_directories, watch_dir_list)
             current_files = set()
             
             # --- Phase 1: Radar Scan ---
