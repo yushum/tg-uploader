@@ -97,10 +97,10 @@ class UploadSender:
                 await asyncio.sleep(wait_time)
             except Exception as e:
                 retries += 1
-                if retries >= 15:
+                if retries >= 30:
                     raise e
                 log.warning(f"FastTelethon Upload Worker retry {retries}: {e}")
-                await asyncio.sleep(2)
+                await asyncio.sleep(5)
         self.request.file_part += self.stride
 
     async def disconnect(self) -> None:
