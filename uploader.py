@@ -113,9 +113,9 @@ def update_upload_status(conn: sqlite3.Connection, filepath: str, status: str, m
 
 def get_upload_message_id(conn: sqlite3.Connection, dir_path: str, prefix_pattern: str) -> int:
     """利用精确路径前缀进行索引查询，避免全表扫描和通配符污染"""
-    safe_prefix = prefix_pattern.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-    search_pattern = os.path.join(dir_path, safe_prefix) + "%"
-    cursor = conn.execute('SELECT message_id FROM uploads WHERE filepath LIKE ? ESCAPE "\\" AND status = "COMPLETED" AND message_id IS NOT NULL', (search_pattern,))
+    raw_pattern = os.path.join(dir_path, prefix_pattern)
+    safe_pattern = raw_pattern.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + "%"
+    cursor = conn.execute('SELECT message_id FROM uploads WHERE filepath LIKE ? ESCAPE "\\" AND status = "COMPLETED" AND message_id IS NOT NULL', (safe_pattern,))
     row = cursor.fetchone()
     return row[0] if row else None
 
@@ -128,7 +128,10 @@ async def generate_thumbnail(video_path: str) -> str:
     thumb_path = f"{video_path}.thumb.jpg"
     # 如果处于只读挂载目录，将封面生成在临时目录，避免权限报错
     if not os.access(os.path.dirname(video_path), os.W_OK):
-        thumb_path = os.path.join('/tmp', f"{os.path.basename(video_path)}.thumb.jpg")
+        import uuid
+        thumb_path = os.path.join('/tmp', f"{os.path.basename(video_path)}_{uuid.uuid4().hex[:8]}.thumb.jpg")
+    else:
+        thumb_path = f"{video_path}.thumb.jpg"
         
     for ss in ['00:00:05', '00:00:00']:
         process = None
@@ -282,7 +285,9 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 
             # 极速转封装：将 ts/flv/mkv 无损转换为 mp4，输出到可写的 session 临时目录，并加入 UUID 防止重名冲突
             unique_suffix = uuid.uuid4().hex[:8]
-            upload_target_path = os.path.join('/app/session', f"{filename_no_ext}_{unique_suffix}_converted.mp4")
+            session_dir = os.path.dirname(SESSION_NAME)
+            os.makedirs(session_dir, exist_ok=True)
+            upload_target_path = os.path.join(session_dir, f"{filename_no_ext}_{unique_suffix}_converted.mp4")
             logger.info(f"Converting to MP4: {filepath} -> {upload_target_path}")
             cmd = [
                 'ffmpeg', '-y',
@@ -292,11 +297,17 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 upload_target_path
             ]
             
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+            except Exception as e:
+                logger.error(f"Failed to start FFmpeg remux for {filepath}: {e}")
+                update_upload_status(conn, filepath, 'FAILED')
+                return
+                
             try:
                 # 增加 1800 秒超时控制，防止坏视频导致 Remux 卡死
                 await asyncio.wait_for(process.communicate(), timeout=1800)
@@ -391,12 +402,17 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                         ]
                         logger.info(f"Trial split with target_seconds={target_seconds}s: {cmd}")
                         
-                        process = await asyncio.create_subprocess_exec(
-                            *cmd,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.DEVNULL
-                        )
-                        
+                        try:
+                            process = await asyncio.create_subprocess_exec(
+                                *cmd,
+                                stdout=asyncio.subprocess.DEVNULL,
+                                stderr=asyncio.subprocess.DEVNULL
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to start FFmpeg split for {filepath}: {e}")
+                            update_upload_status(conn, filepath, 'FAILED')
+                            return
+                            
                         try:
                             await asyncio.wait_for(process.communicate(), timeout=1800)
                         except asyncio.TimeoutError:
@@ -710,6 +726,7 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
     file_stats = {}
     # 状态机：记录当前正在后台执行的上传任务
     active_upload_tasks = {}
+    fail_counts = {}
     # 全局并发锁：控制同时处于上传状态的文件数，可通过 MAX_CONCURRENT_UPLOADS 配置（高带宽服务器可适当调大）
     global_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
     
@@ -728,8 +745,12 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
                     
                 status = get_upload_status(conn, path_str)
                 # Skip completed, failed, or explicitly skipped files
-                if status in ('COMPLETED', 'SKIPPED_FOR_NATIVE_MP4', 'SKIPPED_DUPLICATE_MP4', 'SKIPPED_EMPTY_FILE', 'SKIPPED_FOR_SPLIT', 'FAILED'):
+                if status in ('COMPLETED', 'SKIPPED_FOR_NATIVE_MP4', 'SKIPPED_DUPLICATE_MP4', 'SKIPPED_EMPTY_FILE', 'SKIPPED_FOR_SPLIT'):
                     continue
+                if status == 'FAILED':
+                    fail_counts[path_str] = fail_counts.get(path_str, 0) + 1
+                    if fail_counts[path_str] > 3:
+                        continue
                 # Skip if already in active background tasks
                 if path_str in active_upload_tasks:
                     continue
