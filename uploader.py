@@ -6,6 +6,8 @@ import signal
 import re
 import json
 import math
+import shutil
+import uuid
 from pathlib import Path
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -119,7 +121,7 @@ async def generate_thumbnail(video_path: str) -> str:
                 '-ss', ss,
                 '-i', video_path,
                 '-vframes', '1',
-                '-vf', 'scale=320:-1',
+                '-vf', 'scale=320:-2',
                 '-q:v', '5',
                 thumb_path
             ]
@@ -262,7 +264,6 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 return
                 
             # 极速转封装：将 ts/flv/mkv 无损转换为 mp4，输出到可写的 session 临时目录，并加入 UUID 防止重名冲突
-            import uuid
             unique_suffix = uuid.uuid4().hex[:8]
             upload_target_path = os.path.join('/app/session', f"{filename_no_ext}_{unique_suffix}_converted.mp4")
             logger.info(f"Converting to MP4: {filepath} -> {upload_target_path}")
@@ -346,10 +347,11 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                     dir_path = os.path.dirname(filepath)
                     filename = os.path.basename(filepath)
                     original_name_without_ext = os.path.splitext(filename)[0]
-                    
                     split_successful = False
+                    retry_count = 0
                     
-                    while not split_successful:
+                    while not split_successful and retry_count < 10:
+                        retry_count += 1
                         output_pattern = os.path.join(dir_path, f"{original_name_without_ext}_%03d.mp4")
                         
                         cmd = [
@@ -635,7 +637,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             else:
                                 break  # 目录不为空，说明还有别的视频，停止清理
                         except Exception as e:
-                            logger.warning(f"Could not remove directory {dir_path}: {e}")
+                            logger.warning(f"Could not remove directory {dir_path_obj}: {e}")
                             break
                             
                 except Exception as del_e:
@@ -657,7 +659,7 @@ def _sync_scan_directories(watch_dir_list):
     # 使用单次遍历获取所有文件，避免多次 rglob 的极高 I/O 浪费
     for w_dir in watch_dir_list:
         for file in w_dir.rglob('*'):
-            if file.is_file() and file.suffix.lower() in ('.mp4', '.ts', '.flv', '.mkv', '.jpg', '.png'):
+            if file.is_file() and file.suffix.lower() in ('.mp4', '.ts', '.flv', '.mkv'):
                 all_files.append(file)
     return all_files
 
@@ -875,7 +877,6 @@ async def main():
     try:
         me = await client.get_me()
         if me:
-            global MAX_SPLIT_SIZE_MB
             if getattr(me, 'premium', False):
                 MAX_SPLIT_SIZE_MB = 4000
                 logger.info(f"Logged in as {me.first_name} (Premium: Yes). Max split size auto-configured to {MAX_SPLIT_SIZE_MB}MB.")
