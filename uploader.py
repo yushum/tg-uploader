@@ -171,8 +171,9 @@ async def get_video_attributes(video_path: str):
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
             info = json.loads(stdout)
             
-            width = int(info.get('streams', [{}])[0].get('width', 0))
-            height = int(info.get('streams', [{}])[0].get('height', 0))
+            streams = info.get('streams', [])
+            width = int(streams[0].get('width', 0)) if streams else 0
+            height = int(streams[0].get('height', 0)) if streams else 0
             duration = int(float(info.get('format', {}).get('duration', 0)))
             
             return width, height, duration
@@ -267,7 +268,6 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 'ffmpeg', '-y',
                 '-i', filepath,
                 '-c', 'copy',
-                '-bsf:a', 'aac_adtstoasc',
                 '-movflags', '+faststart',
                 upload_target_path
             ]
