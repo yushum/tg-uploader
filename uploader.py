@@ -262,11 +262,11 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
             unique_suffix = uuid.uuid4().hex[:8]
             upload_target_path = os.path.join('/app/session', f"{filename_no_ext}_{unique_suffix}_converted.mp4")
             logger.info(f"Converting to MP4: {filepath} -> {upload_target_path}")
-            
             cmd = [
                 'ffmpeg', '-y',
                 '-i', filepath,
                 '-c', 'copy',
+                '-bsf:a', 'aac_adtstoasc',
                 '-movflags', '+faststart',
                 upload_target_path
             ]
@@ -601,9 +601,12 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
 def _sync_scan_directories(watch_dir_list):
     """Helper for running blocking directory scans in a separate thread"""
     all_files = []
+    valid_suffixes = {'.mp4', '.ts', '.flv', '.mkv'}
     for w_dir in watch_dir_list:
         if w_dir.exists():
-            all_files.extend(list(w_dir.rglob('*.mp4')) + list(w_dir.rglob('*.ts')) + list(w_dir.rglob('*.flv')) + list(w_dir.rglob('*.mkv')))
+            for f in w_dir.rglob('*'):
+                if f.suffix.lower() in valid_suffixes:
+                    all_files.append(f)
     return all_files
 
 async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):

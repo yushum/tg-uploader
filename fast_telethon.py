@@ -212,7 +212,10 @@ class ParallelTransferrer:
         self.upload_ticker = (self.upload_ticker + 1) % len(self.senders)
 
     async def finish_upload(self) -> None:
-        await self._cleanup()
+        if self.senders:
+            for sender in self.senders:
+                if sender.previous:
+                    await sender.previous
 
     async def download(self, file: TypeLocation, file_size: int,
                        part_size_kb: Optional[float] = None,
@@ -234,6 +237,7 @@ class ParallelTransferrer:
                 yield data
                 part += 1
 
+        await self.finish_upload()
         await self._cleanup()
 
 
@@ -289,8 +293,9 @@ async def _internal_transfer_to_telegram(client: TelegramClient,
                 buffer.extend(data)
         if len(buffer) > 0:
             await uploader.upload(bytes(buffer))
-    finally:
         await uploader.finish_upload()
+    finally:
+        await uploader._cleanup()
         
     if is_large:
         return InputFileBig(file_id, part_count, "upload"), file_size
