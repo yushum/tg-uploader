@@ -18,9 +18,10 @@ API_ID = int(os.getenv('API_ID', '0'))
 API_HASH = os.getenv('API_HASH', '')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID', '0'))
 WATCH_DIR = os.getenv('WATCH_DIR', '/downloads')
+WATCH_DIR = os.getenv('WATCH_DIR', '/downloads')
 SESSION_NAME = os.getenv('SESSION_NAME', '/app/session/uploader')
 DB_PATH = os.getenv('DB_PATH', '/app/session/uploader.db')
-MAX_SPLIT_SIZE_MB = 1950  # Dynamic default, will be overridden by Premium status check
+MAX_SPLIT_SIZE_MB = int(os.getenv('MAX_SPLIT_SIZE_MB', '2000'))  # Dynamic default, will be overridden by Premium status check
 MAX_CONCURRENT_UPLOADS = int(os.getenv('MAX_CONCURRENT_UPLOADS', '1'))
 CHECK_INTERVAL = 15  # File stability check interval in seconds
 
@@ -96,8 +97,8 @@ def update_upload_status(conn: sqlite3.Connection, filepath: str, status: str, m
     conn.commit()
 
 def get_upload_message_id(conn: sqlite3.Connection, dir_path: str, prefix_pattern: str) -> int:
-    """利用精确路径前缀进行索引查询，避免全表扫描和 _ 通配符污染"""
-    safe_prefix = prefix_pattern.replace('_', '\\_')
+    """利用精确路径前缀进行索引查询，避免全表扫描和通配符污染"""
+    safe_prefix = prefix_pattern.replace('%', '\\%').replace('_', '\\_')
     search_pattern = os.path.join(dir_path, safe_prefix) + "%"
     cursor = conn.execute('SELECT message_id FROM uploads WHERE filepath LIKE ? ESCAPE "\\" AND status = "COMPLETED" AND message_id IS NOT NULL', (search_pattern,))
     row = cursor.fetchone()
@@ -115,6 +116,7 @@ async def generate_thumbnail(video_path: str) -> str:
         thumb_path = os.path.join('/tmp', f"{os.path.basename(video_path)}.thumb.jpg")
         
     for ss in ['00:00:05', '00:00:00']:
+        process = None
         try:
             cmd = [
                 'ffmpeg', '-y',
@@ -360,6 +362,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             '-c', 'copy',
                             '-f', 'segment',
                             '-segment_time', str(target_seconds),
+                            '-segment_start_number', '1',
                             '-reset_timestamps', '1',
                             '-movflags', '+faststart',
                             output_pattern
@@ -440,13 +443,6 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                                     except Exception: pass
                                 else:
                                     valid_files.append(part_file)
-                                    
-                            # Rename files to 001, 002 instead of 000, 001
-                            for i in reversed(range(len(valid_files))):
-                                old_name = valid_files[i]
-                                new_name = os.path.join(dir_path, f"{original_name_without_ext}_{i+1:03d}.mp4")
-                                if old_name != new_name:
-                                    os.rename(old_name, new_name)
                                 
                             split_successful = True
                             
@@ -476,6 +472,9 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
         # 作用域初始化
         chunk_idx = None
         prefix = None
+        source_name = None
+        date_str = None
+        time_str = None
         
         # Parse filename to generate formatted caption
         
@@ -598,7 +597,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 logger.info(f"Upload COMPLETED: {filepath}")
                 
                 # ====== Cascade Edit ======
-                if chunk_idx is not None and chunk_idx != "000" and chunk_idx.isdigit():
+                if chunk_idx is not None and chunk_idx != "000" and chunk_idx.isdigit() and source_name is not None:
                     zero_chunk_msg_id = get_upload_message_id(conn, dir_path, f"{prefix}000")
                     if zero_chunk_msg_id:
                         new_caption = f"{source_name} {date_str} {time_str} 000"
