@@ -98,7 +98,7 @@ def update_upload_status(conn: sqlite3.Connection, filepath: str, status: str, m
 
 def get_upload_message_id(conn: sqlite3.Connection, dir_path: str, prefix_pattern: str) -> int:
     """利用精确路径前缀进行索引查询，避免全表扫描和通配符污染"""
-    safe_prefix = prefix_pattern.replace('%', '\\%').replace('_', '\\_')
+    safe_prefix = prefix_pattern.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     search_pattern = os.path.join(dir_path, safe_prefix) + "%"
     cursor = conn.execute('SELECT message_id FROM uploads WHERE filepath LIKE ? ESCAPE "\\" AND status = "COMPLETED" AND message_id IS NOT NULL', (search_pattern,))
     row = cursor.fetchone()
@@ -399,8 +399,8 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             
                         # Validate generated files
                         generated_files = []
-                        # 查找所有生成的分片 (000, 001, 002...)
-                        for i in range(1000): # max 1000 parts
+                        # 查找所有生成的分片 (001, 002...)
+                        for i in range(1, 1001): # max 1000 parts
                             part_file = os.path.join(dir_path, f"{original_name_without_ext}_{i:03d}.mp4")
                             if os.path.exists(part_file):
                                 generated_files.append(part_file)
@@ -876,7 +876,11 @@ async def main():
     try:
         me = await client.get_me()
         if me:
-            if getattr(me, 'premium', False):
+            configured_split_size = os.getenv("MAX_SPLIT_SIZE_MB")
+            if configured_split_size:
+                MAX_SPLIT_SIZE_MB = int(configured_split_size)
+                logger.info(f"Using explicitly configured MAX_SPLIT_SIZE_MB: {MAX_SPLIT_SIZE_MB}MB")
+            elif getattr(me, 'premium', False):
                 MAX_SPLIT_SIZE_MB = 4000
                 logger.info(f"Logged in as {me.first_name} (Premium: Yes). Max split size auto-configured to {MAX_SPLIT_SIZE_MB}MB.")
             else:
