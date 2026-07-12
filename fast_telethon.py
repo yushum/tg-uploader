@@ -136,8 +136,13 @@ class ParallelTransferrer:
     @staticmethod
     def _get_connection_count(file_size: int, max_count: int = 0,
                               full_size: int = 100 * 1024 * 1024) -> int:
-        if max_count == 0:
-            max_count = int(os.getenv('MAX_CONNECTIONS', '20'))
+        if max_count <= 0:
+            try:
+                max_count = int(os.getenv('MAX_CONNECTIONS', '20'))
+                if max_count < 1: max_count = 20
+                elif max_count > 32: max_count = 32
+            except ValueError:
+                max_count = 20
         if file_size > full_size:
             return max_count
         return math.ceil((file_size / full_size) * max_count)

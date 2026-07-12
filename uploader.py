@@ -12,17 +12,41 @@ from pathlib import Path
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 from telethon.tl.types import DocumentAttributeVideo
+# ---------------- 日志配置 ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s][%(levelname)s][%(module)s] %(message)s'
+)
+# Suppress overly verbose logs from Telethon
+logging.getLogger('telethon').setLevel(logging.WARNING)
+logger = logging.getLogger('tg-uploader')
+
+def get_positive_int_env(name: str, default: int, *, minimum: int = 1, maximum: int = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"{name}={raw} invalid, using default {default}")
+        return default
+    if value < minimum:
+        logger.warning(f"{name}={value} must be >= {minimum}, using default {default}")
+        return default
+    if maximum is not None and value > maximum:
+        logger.warning(f"{name}={value} must be <= {maximum}, using default {default}")
+        return default
+    return value
 
 # ---------------- Configuration ----------------
 API_ID = int(os.getenv('API_ID', '0'))
 API_HASH = os.getenv('API_HASH', '')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID', '0'))
 WATCH_DIR = os.getenv('WATCH_DIR', '/downloads')
-WATCH_DIR = os.getenv('WATCH_DIR', '/downloads')
 SESSION_NAME = os.getenv('SESSION_NAME', '/app/session/uploader')
 DB_PATH = os.getenv('DB_PATH', '/app/session/uploader.db')
-MAX_SPLIT_SIZE_MB = int(os.getenv('MAX_SPLIT_SIZE_MB', '2000'))  # Dynamic default, will be overridden by Premium status check
-MAX_CONCURRENT_UPLOADS = int(os.getenv('MAX_CONCURRENT_UPLOADS', '1'))
+MAX_SPLIT_SIZE_MB = get_positive_int_env('MAX_SPLIT_SIZE_MB', 2000, minimum=50, maximum=4000)
+MAX_CONCURRENT_UPLOADS = get_positive_int_env('MAX_CONCURRENT_UPLOADS', 1, minimum=1, maximum=10)
 CHECK_INTERVAL = 15  # File stability check interval in seconds
 
 # ---------------- Customization & Network ----------------
@@ -34,15 +58,6 @@ APP_VERSION = os.getenv('APP_VERSION', '2.0')
 PROXY_TYPE = os.getenv('PROXY_TYPE', '')
 PROXY_HOST = os.getenv('PROXY_HOST', '')
 PROXY_PORT = os.getenv('PROXY_PORT', '')
-
-# ---------------- 日志配置 ----------------
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s][%(levelname)s][%(module)s] %(message)s'
-)
-# Suppress overly verbose logs from Telethon
-logging.getLogger('telethon').setLevel(logging.WARNING)
-logger = logging.getLogger('tg-uploader')
 
 is_running = True
 
@@ -351,6 +366,13 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                     original_name_without_ext = os.path.splitext(filename)[0]
                     split_successful = False
                     retry_count = 0
+                    
+                    # Clean up any previously generated segments before trying again
+                    part_pattern = re.compile(rf'^{re.escape(original_name_without_ext)}_\d{{3}}\.mp4$')
+                    for candidate in Path(dir_path).iterdir():
+                        if candidate.is_file() and part_pattern.match(candidate.name):
+                            try: candidate.unlink()
+                            except Exception as e: logger.warning(f"Could not clean old part {candidate}: {e}")
                     
                     while not split_successful and retry_count < 10:
                         retry_count += 1
@@ -749,12 +771,14 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
                     prefix = name_without_ext
                     idx = 0
                     
-                if prefix not in groups:
-                    groups[prefix] = []
-                groups[prefix].append({'path': path_str, 'idx': idx})
+                group_key = (str(Path(path_str).parent.resolve()), prefix)
+                if group_key not in groups:
+                    groups[group_key] = []
+                groups[group_key].append({'path': path_str, 'idx': idx})
                 
-            # Sort groups by prefix (which includes date) to ensure chronological uploads
-            for prefix, files in sorted(groups.items(), key=lambda x: x[0]):
+            # Sort groups by parent path and prefix to ensure chronological uploads
+            for group_key, files in sorted(groups.items(), key=lambda x: x[0][1]):
+                prefix = group_key[1]
                 if not is_running:
                     break
                     
