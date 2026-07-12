@@ -862,10 +862,10 @@ async def main():
         if me:
             global MAX_SPLIT_SIZE_MB
             if getattr(me, 'premium', False):
-                MAX_SPLIT_SIZE_MB = 3950
+                MAX_SPLIT_SIZE_MB = 4000
                 logger.info(f"Logged in as {me.first_name} (Premium: Yes). Max split size auto-configured to {MAX_SPLIT_SIZE_MB}MB.")
             else:
-                MAX_SPLIT_SIZE_MB = 1950
+                MAX_SPLIT_SIZE_MB = 2000
                 logger.info(f"Logged in as {me.first_name} (Premium: No). Max split size auto-configured to {MAX_SPLIT_SIZE_MB}MB.")
     except Exception as e:
         logger.warning(f"Could not retrieve user profile to check Premium status: {e}")
