@@ -727,8 +727,8 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
                     continue
                     
                 status = get_upload_status(conn, path_str)
-                # Skip completed or explicitly skipped files
-                if status in ('COMPLETED', 'SKIPPED_FOR_NATIVE_MP4', 'SKIPPED_DUPLICATE_MP4', 'SKIPPED_EMPTY_FILE', 'SKIPPED_FOR_SPLIT'):
+                # Skip completed, failed, or explicitly skipped files
+                if status in ('COMPLETED', 'SKIPPED_FOR_NATIVE_MP4', 'SKIPPED_DUPLICATE_MP4', 'SKIPPED_EMPTY_FILE', 'SKIPPED_FOR_SPLIT', 'FAILED'):
                     continue
                 # Skip if already in active background tasks
                 if path_str in active_upload_tasks:
@@ -809,8 +809,9 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
                     filename = os.path.basename(active_path)
                     name_without_ext = os.path.splitext(filename)[0]
                     a_parts = name_without_ext.split('_')
-                    a_prefix = '_'.join(a_parts[:-1]) if (len(a_parts) >= 4 and a_parts[-1].isdigit()) else name_without_ext
-                    if a_prefix == prefix:
+                    a_prefix = '_'.join(a_parts[:-1]) if (len(a_parts) >= 4 and a_parts[-1].isdigit() and len(a_parts[-1]) >= 3) else name_without_ext
+                    a_group_key = (str(Path(active_path).parent.resolve()), a_prefix)
+                    if a_group_key == group_key:
                         is_group_busy = True
                         break
                         
@@ -900,9 +901,7 @@ async def main():
     try:
         me = await client.get_me()
         if me:
-            configured_split_size = os.getenv("MAX_SPLIT_SIZE_MB")
-            if configured_split_size:
-                MAX_SPLIT_SIZE_MB = int(configured_split_size)
+            if os.getenv("MAX_SPLIT_SIZE_MB") is not None:
                 logger.info(f"Using explicitly configured MAX_SPLIT_SIZE_MB: {MAX_SPLIT_SIZE_MB}MB")
             elif getattr(me, 'premium', False):
                 MAX_SPLIT_SIZE_MB = 4000
