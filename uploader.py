@@ -465,7 +465,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
         # Parse filename to generate formatted caption
         
         # Match pattern: SourceName_YYYY-MM-DDTHH_MM_SS
-        iso_date_match = re.match(r'^(.*?)([0-9]{4}-[0-9]{2}-[0-9]{2})T(.*)$', name_without_ext)
+        iso_date_match = re.match(r'^(.*)([0-9]{4}-[0-9]{2}-[0-9]{2})T(.*)$', name_without_ext)
         
         if iso_date_match:
             source_name = iso_date_match.group(1)
@@ -640,15 +640,31 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 os.remove(upload_target_path)
 
 def _sync_scan_directories(watch_dir_list):
-    """Helper for running blocking directory scans in a separate thread"""
     all_files = []
-    valid_suffixes = {'.mp4', '.ts', '.flv', '.mkv'}
+    # 使用单次遍历获取所有文件，避免多次 rglob 的极高 I/O 浪费
     for w_dir in watch_dir_list:
-        if w_dir.exists():
-            for f in w_dir.rglob('*'):
-                if f.suffix.lower() in valid_suffixes:
-                    all_files.append(f)
+        for file in w_dir.rglob('*'):
+            if file.is_file() and file.suffix.lower() in ('.mp4', '.ts', '.flv', '.mkv', '.jpg', '.png'):
+                all_files.append(file)
     return all_files
+
+def _sync_global_prune(watch_dir_list):
+    for w_dir in watch_dir_list:
+        try:
+            if not w_dir.exists():
+                continue
+            watch_dir_abs = str(w_dir.resolve())
+            for root_dir, dirs, files in os.walk(watch_dir_abs, topdown=False):
+                if root_dir == watch_dir_abs:
+                    continue
+                if not os.listdir(root_dir):
+                    try:
+                        os.rmdir(root_dir)
+                        logger.info(f"Global pruning: Removed empty directory {root_dir}")
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"Global pruning error for {w_dir}: {e}")
 
 async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
     """目录非阻塞雷达轮询与智能并发任务调度主循环"""
@@ -792,23 +808,8 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
             
         if is_running:
             # --- 全局空文件夹修剪 (Global Empty Directory Pruning) ---
-            # 无论什么原因产生的空文件夹，每 10 秒都会被自底向上彻底抹除
-            for w_dir in watch_dir_list:
-                try:
-                    if not w_dir.exists():
-                        continue
-                    watch_dir_abs = str(w_dir.resolve())
-                    for root_dir, dirs, files in os.walk(watch_dir_abs, topdown=False):
-                        if root_dir == watch_dir_abs:
-                            continue
-                        if not os.listdir(root_dir):
-                            try:
-                                os.rmdir(root_dir)
-                                logger.info(f"Global pruning: Removed empty directory {root_dir}")
-                            except Exception:
-                                pass
-                except Exception as e:
-                    logger.warning(f"Global pruning error for {w_dir}: {e}")
+            # 无论什么原因产生的空文件夹，每 10 秒都会被自底向上彻底抹除，放入独立线程池防阻塞
+            await asyncio.to_thread(_sync_global_prune, watch_dir_list)
                 
             await asyncio.sleep(10)  # 雷达每 10 秒扫一次
 
