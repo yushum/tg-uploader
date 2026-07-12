@@ -263,14 +263,16 @@ async def _internal_transfer_to_telegram(client: TelegramClient,
     # Default part size 512KB for maximum upload throughput
     part_size, part_count, is_large = await uploader.init_upload(file_id, file_size, part_size_kb=512)
     buffer = bytearray()
+    current_offset = 0
     
     try:
         # We read 512KB directly so we don't need small buffer concat overhead mostly
         for data in stream_file(response, chunk_size=part_size):
             if progress_callback:
-                r = progress_callback(offset, file_size)
+                r = progress_callback(current_offset, file_size)
                 if inspect.isawaitable(r):
                     await r
+            current_offset += len(data)
             if not is_large:
                 hash_md5.update(data)
             if len(buffer) == 0 and len(data) == part_size:
