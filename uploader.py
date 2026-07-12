@@ -18,7 +18,7 @@ CHANNEL_ID = int(os.getenv('CHANNEL_ID', '0'))
 WATCH_DIR = os.getenv('WATCH_DIR', '/downloads')
 SESSION_NAME = os.getenv('SESSION_NAME', '/app/session/uploader')
 DB_PATH = os.getenv('DB_PATH', '/app/session/uploader.db')
-MAX_SPLIT_SIZE_MB = int(os.getenv('MAX_SPLIT_SIZE_MB', '4000'))
+MAX_SPLIT_SIZE_MB = 1950  # Dynamic default, will be overridden by Premium status check
 MAX_CONCURRENT_UPLOADS = int(os.getenv('MAX_CONCURRENT_UPLOADS', '1'))
 CHECK_INTERVAL = 15  # File stability check interval in seconds
 
@@ -312,7 +312,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
         max_size_bytes = MAX_SPLIT_SIZE_MB * 1024 * 1024
         
         if file_size_bytes > max_size_bytes:
-            logger.info(f"File {upload_target_path} exceeds limit ({file_size_bytes} > {max_size_bytes} bytes). Initiating lossless split...")
+            logger.info(f"File {upload_target_path} exceeds limit ({file_size_bytes} > {max_size_bytes} bytes). Initiating lossless segment split...")
             _, _, duration = await get_video_attributes(upload_target_path)
             if duration > 0 and duration <= 60:
                 logger.warning(f"File {upload_target_path} exceeds limit but duration is only {duration}s. Refusing to split to prevent infinite loop.")
@@ -320,7 +320,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 bytes_per_sec = file_size_bytes / duration
                 target_seconds = math.floor((max_size_bytes * 0.95) / bytes_per_sec)
                 
-                # Safeguard: clamp target_seconds 绝对防止切割出超过原始文件大小的整块导致死循环
+                # Safeguard: clamp target_seconds
                 if target_seconds < 60:
                     logger.warning(f"Calculated target_seconds {target_seconds} is too low. Clamping to 60s.")
                     target_seconds = 60
@@ -333,44 +333,39 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                     dir_path = os.path.dirname(filepath)
                     filename = os.path.basename(filepath)
                     original_name_without_ext = os.path.splitext(filename)[0]
-                    parts = original_name_without_ext.split('_')
                     
-                    current_start = 0
-                    part_idx = 0
-                    split_failed = False
+                    split_successful = False
                     
-                    while current_start < duration:
-                        if len(parts) >= 4 and parts[-1].isdigit():
-                            output_file = os.path.join(dir_path, f"{original_name_without_ext}{part_idx:02d}.mp4")
-                        else:
-                            output_file = os.path.join(dir_path, f"{original_name_without_ext}_{part_idx:03d}.mp4")
-                            
+                    while not split_successful:
+                        output_pattern = os.path.join(dir_path, f"{original_name_without_ext}_%03d.mp4")
+                        
                         cmd = [
                             'ffmpeg', '-y',
-                            '-ss', str(current_start),
                             '-i', upload_target_path,
-                            '-t', str(target_seconds),
                             '-c', 'copy',
+                            '-f', 'segment',
+                            '-segment_time', str(target_seconds),
+                            '-reset_timestamps', '1',
                             '-movflags', '+faststart',
-                            output_file
+                            output_pattern
                         ]
-                        logger.info(f"Splitting part {part_idx} (start={current_start}s, target={target_seconds}s): {cmd}")
+                        logger.info(f"Trial split with target_seconds={target_seconds}s: {cmd}")
                         
                         process = await asyncio.create_subprocess_exec(
                             *cmd,
                             stdout=asyncio.subprocess.DEVNULL,
                             stderr=asyncio.subprocess.DEVNULL
                         )
+                        
                         try:
                             await asyncio.wait_for(process.communicate(), timeout=1800)
                         except asyncio.TimeoutError:
-                            logger.error(f"FFmpeg split timed out at part {part_idx} for {upload_target_path}")
+                            logger.error(f"FFmpeg segment split timed out for {upload_target_path}")
                             if process:
                                 try: 
                                     process.kill()
                                     await asyncio.wait_for(process.wait(), timeout=2.0)
                                 except Exception: pass
-                            split_failed = True
                             break
                         except asyncio.CancelledError:
                             if process:
@@ -381,26 +376,71 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             raise
                             
                         if process.returncode != 0:
-                            if not os.path.exists(output_file) or os.path.getsize(output_file) < 1024:
-                                try: os.remove(output_file)
-                                except Exception: pass
+                            logger.error(f"FFmpeg segment split failed with code {process.returncode}")
+                            break
+                            
+                        # Validate generated files
+                        generated_files = []
+                        # 查找所有生成的分片 (000, 001, 002...)
+                        for i in range(1000): # max 1000 parts
+                            part_file = os.path.join(dir_path, f"{original_name_without_ext}_{i:03d}.mp4")
+                            if os.path.exists(part_file):
+                                generated_files.append(part_file)
                             else:
-                                logger.error(f"FFmpeg split failed at part {part_idx} with code {process.returncode}")
-                                split_failed = True
                                 break
-                        else:
-                            if os.path.exists(output_file) and os.path.getsize(output_file) < 1024:
-                                try: os.remove(output_file)
-                                except Exception: pass
                                 
-                        current_start += target_seconds
-                        part_idx += 1
-                        
-                    if not split_failed:
-                        logger.info(f"Manual split successful for {filepath}. Removed original and yielding to radar.")
+                        if not generated_files:
+                            logger.error("FFmpeg produced no output files.")
+                            break
+                            
+                        # Check sizes
+                        needs_retry = False
+                        max_part_size = 0
+                        for part_file in generated_files:
+                            size = os.path.getsize(part_file)
+                            max_part_size = max(max_part_size, size)
+                            if size > max_size_bytes:
+                                logger.info(f"Generated part {part_file} is too big ({size} bytes). Adjusting and retrying...")
+                                needs_retry = True
+                                break
+                                
+                        if needs_retry:
+                            # Delete all generated files
+                            for part_file in generated_files:
+                                try: os.remove(part_file)
+                                except Exception: pass
+                            
+                            # Adjust target_seconds based on the largest part
+                            ratio = (max_size_bytes * 0.95) / max_part_size
+                            new_target = math.floor(target_seconds * ratio)
+                            if new_target >= target_seconds:
+                                new_target = target_seconds - 10 # force reduction
+                            target_seconds = max(60, new_target)
+                        else:
+                            # Clean up small fragments < 1MB that segment muxer sometimes produces at the end
+                            valid_files = []
+                            for part_file in generated_files:
+                                if os.path.getsize(part_file) < 1024 * 1024:
+                                    try: os.remove(part_file)
+                                    except Exception: pass
+                                else:
+                                    valid_files.append(part_file)
+                                    
+                            # Rename files to 001, 002 instead of 000, 001
+                            for i in reversed(range(len(valid_files))):
+                                old_name = valid_files[i]
+                                new_name = os.path.join(dir_path, f"{original_name_without_ext}_{i+1:03d}.mp4")
+                                if old_name != new_name:
+                                    os.rename(old_name, new_name)
+                                
+                            split_successful = True
+                            
+                    if split_successful:
+                        logger.info(f"Manual segment split successful for {filepath}. Removed original and yielding to radar.")
                         update_upload_status(conn, filepath, 'SKIPPED_FOR_SPLIT')
-                        try: os.remove(filepath)
-                        except Exception: pass
+                        if os.path.exists(filepath):
+                            try: os.remove(filepath)
+                            except Exception: pass
                         if is_temp_mp4 and os.path.exists(upload_target_path):
                             try: os.remove(upload_target_path)
                             except Exception: pass
@@ -820,14 +860,13 @@ async def main():
     try:
         me = await client.get_me()
         if me:
+            global MAX_SPLIT_SIZE_MB
             if getattr(me, 'premium', False):
-                logger.info(f"Logged in as {me.first_name} (Premium: Yes). Max upload size remains {MAX_SPLIT_SIZE_MB}MB.")
+                MAX_SPLIT_SIZE_MB = 3950
+                logger.info(f"Logged in as {me.first_name} (Premium: Yes). Max split size auto-configured to {MAX_SPLIT_SIZE_MB}MB.")
             else:
-                if MAX_SPLIT_SIZE_MB > 1950:
-                    logger.warning(f"Logged in as {me.first_name} (Premium: No). Forcing max upload size from {MAX_SPLIT_SIZE_MB}MB down to 1950MB to prevent Telegram server rejection.")
-                    MAX_SPLIT_SIZE_MB = 1950
-                else:
-                    logger.info(f"Logged in as {me.first_name} (Premium: No). Max upload size is {MAX_SPLIT_SIZE_MB}MB.")
+                MAX_SPLIT_SIZE_MB = 1950
+                logger.info(f"Logged in as {me.first_name} (Premium: No). Max split size auto-configured to {MAX_SPLIT_SIZE_MB}MB.")
     except Exception as e:
         logger.warning(f"Could not retrieve user profile to check Premium status: {e}")
     

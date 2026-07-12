@@ -32,7 +32,6 @@ API_HASH=your_api_hash
 CHANNEL_ID=-1001234567890
 
 # Optional configuration
-# MAX_SPLIT_SIZE_MB=4000
 # DEVICE_MODEL=TG-Uploader-Server
 # PROXY_TYPE=socks5
 # PROXY_HOST=127.0.0.1
