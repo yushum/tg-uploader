@@ -93,9 +93,11 @@ def update_upload_status(conn: sqlite3.Connection, filepath: str, status: str, m
     ''', (filepath, status, message_id))
     conn.commit()
 
-def get_upload_message_id(conn: sqlite3.Connection, filepath_pattern: str) -> int:
-    """模糊查询符合条件的记录的 message_id"""
-    cursor = conn.execute('SELECT message_id FROM uploads WHERE filepath LIKE ? AND status = "COMPLETED" AND message_id IS NOT NULL', (f"%{filepath_pattern}%",))
+def get_upload_message_id(conn: sqlite3.Connection, dir_path: str, prefix_pattern: str) -> int:
+    """利用精确路径前缀进行索引查询，避免全表扫描和 _ 通配符污染"""
+    safe_prefix = prefix_pattern.replace('_', '\\_')
+    search_pattern = os.path.join(dir_path, safe_prefix) + "%"
+    cursor = conn.execute('SELECT message_id FROM uploads WHERE filepath LIKE ? ESCAPE "\\" AND status = "COMPLETED" AND message_id IS NOT NULL', (search_pattern,))
     row = cursor.fetchone()
     return row[0] if row else None
 
@@ -312,6 +314,17 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
         max_size_bytes = MAX_SPLIT_SIZE_MB * 1024 * 1024
         
         if file_size_bytes > max_size_bytes:
+            dir_path = os.path.dirname(filepath)
+            free_space = shutil.disk_usage(dir_path).free
+            required_space = file_size_bytes * 1.1
+            if free_space < required_space:
+                logger.error(f"Insufficient disk space to safely split {filepath}. Required: {required_space/1024**3:.2f}GB, Free: {free_space/1024**3:.2f}GB. Refusing to split.")
+                update_upload_status(conn, filepath, 'FAILED')
+                if is_temp_mp4 and os.path.exists(upload_target_path):
+                    try: os.remove(upload_target_path)
+                    except Exception: pass
+                return
+                
             logger.info(f"File {upload_target_path} exceeds limit ({file_size_bytes} > {max_size_bytes} bytes). Initiating lossless segment split...")
             _, _, duration = await get_video_attributes(upload_target_path)
             if duration > 0 and duration <= 60:
@@ -481,7 +494,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 sibling_files = [f for f in os.listdir(dir_path) if f.startswith(prefix) and f.endswith(('.mp4', '.ts', '.flv', '.mkv'))]
                 
                 if chunk_idx == "000":
-                    has_uploaded_siblings = (get_upload_message_id(conn, f"{prefix}%") is not None)
+                    has_uploaded_siblings = (get_upload_message_id(conn, dir_path, prefix) is not None)
                     if len(sibling_files) > 1 or has_uploaded_siblings:
                         caption_text = f"{source_name} {date_str} {time_str} {chunk_idx}"
                     else:
@@ -505,7 +518,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 sibling_files = [f for f in os.listdir(dir_path) if f.startswith(prefix) and f.endswith(('.mp4', '.ts', '.flv', '.mkv'))]
                 
                 if chunk_idx == "000":
-                    has_uploaded_siblings = (get_upload_message_id(conn, f"{prefix}%") is not None)
+                    has_uploaded_siblings = (get_upload_message_id(conn, dir_path, prefix) is not None)
                     if len(sibling_files) > 1 or has_uploaded_siblings:
                         caption_text = f"{source_name} {date_str} {time_str} {chunk_idx}"
                     else:
@@ -584,7 +597,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 
                 # ====== Cascade Edit ======
                 if chunk_idx is not None and chunk_idx != "000" and chunk_idx.isdigit():
-                    zero_chunk_msg_id = get_upload_message_id(conn, f"{prefix}000")
+                    zero_chunk_msg_id = get_upload_message_id(conn, dir_path, f"{prefix}000")
                     if zero_chunk_msg_id:
                         new_caption = f"{source_name} {date_str} {time_str} 000"
                         try:
@@ -727,7 +740,8 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
                 parts = name_without_ext.split('_')
                 
                 # Extract prefix (representing a single stream session) and chunk index
-                if len(parts) >= 4 and parts[-1].isdigit():
+                # Ensure the last part is a chunk index (at least 3 digits padded) to avoid collision with timestamp seconds
+                if len(parts) >= 4 and parts[-1].isdigit() and len(parts[-1]) >= 3:
                     prefix = '_'.join(parts[:-1])
                     idx = int(parts[-1])
                 else:
