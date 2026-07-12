@@ -110,44 +110,45 @@ async def generate_thumbnail(video_path: str) -> str:
     if not os.access(os.path.dirname(video_path), os.W_OK):
         thumb_path = os.path.join('/tmp', f"{os.path.basename(video_path)}.thumb.jpg")
         
-    try:
-        cmd = [
-            'ffmpeg', '-y',
-            '-ss', '00:00:05',
-            '-i', video_path,
-            '-vframes', '1',
-            '-vf', 'scale=320:-1',
-            '-q:v', '5',
-            thumb_path
-        ]
-        
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-        # 增加 60 秒超时控制，防止 ffmpeg 因坏文件出现死锁/僵尸进程
-        await asyncio.wait_for(process.communicate(), timeout=60)
-        
-        if process.returncode == 0 and os.path.exists(thumb_path):
-            return thumb_path
-    except asyncio.TimeoutError:
-        logger.error(f"FFmpeg thumbnail generation timed out for {video_path}")
-        if process:
-            try:
-                process.kill()
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except Exception: pass
-    except asyncio.CancelledError:
-        if process:
-            try: 
-                process.kill()
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except Exception: pass
-        raise
-    except Exception as e:
-        logger.error(f"Failed to generate thumbnail for {video_path}: {e}")
-        
+    for ss in ['00:00:05', '00:00:00']:
+        try:
+            cmd = [
+                'ffmpeg', '-y',
+                '-ss', ss,
+                '-i', video_path,
+                '-vframes', '1',
+                '-vf', 'scale=320:-1',
+                '-q:v', '5',
+                thumb_path
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            # 增加 60 秒超时控制，防止 ffmpeg 因坏文件出现死锁/僵尸进程
+            await asyncio.wait_for(process.communicate(), timeout=60)
+            
+            if process.returncode == 0 and os.path.exists(thumb_path):
+                return thumb_path
+        except asyncio.TimeoutError:
+            logger.error(f"FFmpeg thumbnail generation timed out for {video_path} at {ss}")
+            if process:
+                try:
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=2.0)
+                except Exception: pass
+        except asyncio.CancelledError:
+            if process:
+                try: 
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=2.0)
+                except Exception: pass
+            raise
+        except Exception as e:
+            logger.error(f"Failed to generate thumbnail for {video_path} at {ss}: {e}")
+            
     return None
 
 async def get_video_attributes(video_path: str):
@@ -570,14 +571,14 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                     # ====== 级联空文件夹清理 (Empty Directory Pruning) ======
                     # 当文件被删除后，递归检查父目录。如果父目录空了，就把它也删掉，防止海量空文件夹残留。
                     # 终止条件是到达了设置的 WATCH_DIR 根目录。
-                    dir_path = os.path.dirname(filepath)
-                    watch_dir_abs_list = [os.path.abspath(d.strip()) for d in WATCH_DIR.split(',') if d.strip()]
-                    while dir_path and os.path.abspath(dir_path) not in watch_dir_abs_list:
+                    dir_path_obj = Path(filepath).parent
+                    watch_dir_abs_list = [Path(d.strip()).resolve() for d in WATCH_DIR.split(',') if d.strip()]
+                    while dir_path_obj and dir_path_obj.resolve() not in watch_dir_abs_list:
                         try:
-                            if not os.listdir(dir_path):
-                                os.rmdir(dir_path)
-                                logger.info(f"Empty directory auto-cleaned: {dir_path}")
-                                dir_path = os.path.dirname(dir_path)
+                            if not any(dir_path_obj.iterdir()):
+                                dir_path_obj.rmdir()
+                                logger.info(f"Empty directory auto-cleaned: {dir_path_obj}")
+                                dir_path_obj = dir_path_obj.parent
                             else:
                                 break  # 目录不为空，说明还有别的视频，停止清理
                         except Exception as e:
