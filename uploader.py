@@ -19,6 +19,7 @@ WATCH_DIR = os.getenv('WATCH_DIR', '/downloads')
 SESSION_NAME = os.getenv('SESSION_NAME', '/app/session/uploader')
 DB_PATH = os.getenv('DB_PATH', '/app/session/uploader.db')
 MAX_SPLIT_SIZE_MB = int(os.getenv('MAX_SPLIT_SIZE_MB', '4000'))
+MAX_CONCURRENT_UPLOADS = int(os.getenv('MAX_CONCURRENT_UPLOADS', '1'))
 CHECK_INTERVAL = 15  # File stability check interval in seconds
 
 # ---------------- Customization & Network ----------------
@@ -507,7 +508,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
             if not is_running:
                 return
                 
-            logger.info(f"All parts uploaded via FastTelethon. Assembling final message...")
+            logger.info("All parts uploaded via FastTelethon. Assembling final message...")
             
             # 将原始的文件名覆盖到 input_file 上，确保展示为整洁的名字
             clean_filename = f"{name_without_ext}.mp4"
@@ -613,8 +614,8 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
     file_stats = {}
     # 状态机：记录当前正在后台执行的上传任务
     active_upload_tasks = {}
-    # 全局并发锁：将系统总并发发车数锁死在 1（因为 FastTelethon 单文件已使用了 20 个底层并发连接，足以跑满带宽）
-    global_semaphore = asyncio.Semaphore(1)
+    # 全局并发锁：控制同时处于上传状态的文件数，可通过 MAX_CONCURRENT_UPLOADS 配置（高带宽服务器可适当调大）
+    global_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
     
     while is_running:
         try:
