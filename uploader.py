@@ -125,10 +125,8 @@ async def generate_thumbnail(video_path: str) -> str:
     使用 FFmpeg 截取视频封面。
     性能优化：将 -ss 参数放在 -i 前面，实现快速寻道，防止 I/O 阻塞和 CPU 爆满。
     """
-    thumb_path = f"{video_path}.thumb.jpg"
-    # 如果处于只读挂载目录，将封面生成在临时目录，避免权限报错
+    # 如果处于只读挂载目录，将封面生成在临时目录，避免权限报错，且用 UUID 防并发冲突
     if not os.access(os.path.dirname(video_path), os.W_OK):
-        import uuid
         thumb_path = os.path.join('/tmp', f"{os.path.basename(video_path)}_{uuid.uuid4().hex[:8]}.thumb.jpg")
     else:
         thumb_path = f"{video_path}.thumb.jpg"
@@ -224,7 +222,7 @@ async def get_video_attributes(video_path: str):
         return 0, 0, 0
 
 # ---------------- 核心上传模块 ----------------
-async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Connection, semaphore: asyncio.Semaphore):
+async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Connection, semaphore: asyncio.Semaphore, fail_counts: dict):
     """处理视频的缩略图生成与 TG 异步流式上传"""
     if not is_running:
         return
@@ -521,6 +519,7 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
         source_name = None
         date_str = None
         time_str = None
+        dir_path = os.path.dirname(filepath)
         
         # Parse filename to generate formatted caption
         
@@ -691,13 +690,20 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
         except Exception as e:
             logger.error(f"Failed to upload {filepath}: {e}", exc_info=True)
             update_upload_status(conn, filepath, 'FAILED')
+            fail_counts[filepath] = fail_counts.get(filepath, 0) + 1
         finally:
             # 清理临时生成的封面图
-            if thumb_path and os.path.exists(thumb_path):
-                os.remove(thumb_path)
+            try:
+                if thumb_path and os.path.exists(thumb_path):
+                    os.remove(thumb_path)
+            except Exception as e:
+                logger.warning(f"Failed to clean up thumbnail {thumb_path}: {e}")
             # 清理临时转封装生成的 MP4 文件释放空间
-            if is_temp_mp4 and os.path.exists(upload_target_path):
-                os.remove(upload_target_path)
+            try:
+                if is_temp_mp4 and os.path.exists(upload_target_path):
+                    os.remove(upload_target_path)
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp file {upload_target_path}: {e}")
 
 def _sync_scan_directories(watch_dir_list):
     all_files = []
@@ -756,9 +762,10 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
                 if status in ('COMPLETED', 'SKIPPED_FOR_NATIVE_MP4', 'SKIPPED_DUPLICATE_MP4', 'SKIPPED_EMPTY_FILE', 'SKIPPED_FOR_SPLIT'):
                     continue
                 if status == 'FAILED':
-                    fail_counts[path_str] = fail_counts.get(path_str, 0) + 1
-                    if fail_counts[path_str] > 3:
-                        continue
+                    if fail_counts.get(path_str, 0) >= 3:
+                        continue  # 超过 3 次实際重试，永久放弃
+                    # 重置为 PENDING 以便重新进入上传流程，计数在真正重试失败时才增加
+                    update_upload_status(conn, path_str, 'PENDING')
                 # Skip if already in active background tasks
                 if path_str in active_upload_tasks:
                     continue
@@ -783,6 +790,10 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
             for path_str in list(file_stats.keys()):
                 if path_str not in current_files:
                     del file_stats[path_str]
+            # Cleanup stale fail_counts entries for files no longer on disk
+            for path_str in list(fail_counts.keys()):
+                if path_str not in current_files and path_str not in active_upload_tasks:
+                    del fail_counts[path_str]
                     
             # --- Phase 2: Sequential Scheduler (Group-based) ---
             groups = {}
@@ -853,7 +864,7 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
                 
                 logger.info(f"Dispatching task: {min_file['path']} (Group: {prefix}, Index: {min_file['idx']})")
                 # 启动后台独立上传协程
-                task = asyncio.create_task(upload_file(client, min_file['path'], conn, global_semaphore))
+                task = asyncio.create_task(upload_file(client, min_file['path'], conn, global_semaphore, fail_counts))
                 active_upload_tasks[min_file['path']] = task
                 
                 # 注册回调：上传结束（成功或失败）后，从活动字典中移除，释放组通道
@@ -890,7 +901,8 @@ async def main():
     
     # 垃圾清理：清理上次异常崩溃可能遗留的临时转换文件和封面图
     logger.info("Cleaning up any orphaned temporary files...")
-    for temp_dir in ['/app/session', '/tmp']:
+    session_dir = os.path.dirname(SESSION_NAME)
+    for temp_dir in [session_dir, '/tmp']:
         if os.path.exists(temp_dir):
             for file in os.listdir(temp_dir):
                 if file.endswith('_converted.mp4') or file.endswith('.thumb.jpg'):

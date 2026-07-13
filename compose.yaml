@@ -3,6 +3,7 @@ services:
     image: yushum/tg-uploader:latest
     container_name: tg_uploader
     restart: always
+    env_file: .env
     environment:
       - TZ=Asia/Shanghai
       - API_ID=${API_ID}
@@ -22,7 +23,13 @@ services:
       # - PROXY_HOST=127.0.0.1
       # - PROXY_PORT=1080
       
+      # [Optional] Performance Tuning
+      # - MAX_CONCURRENT_UPLOADS=1    # Number of files uploading simultaneously (1-10)
+      # - MAX_CONNECTIONS=20           # Number of parallel MTProto connections per file (1-32)
+      # - MAX_SPLIT_SIZE_MB=2000       # Max file size before splitting, auto-detected by Premium status (50-4000)
+      
     volumes:
       - ./downloads:/downloads
       - ./session:/app/session
     stop_grace_period: 2m
+
