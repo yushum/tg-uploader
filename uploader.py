@@ -149,13 +149,16 @@ async def generate_thumbnail(video_path: str) -> str:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
+                stderr=asyncio.subprocess.PIPE
             )
             # 增加 60 秒超时控制，防止 ffmpeg 因坏文件出现死锁/僵尸进程
-            await asyncio.wait_for(process.communicate(), timeout=60)
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
             
             if process.returncode == 0 and os.path.exists(thumb_path):
                 return thumb_path
+            else:
+                if stderr:
+                    logger.warning(f"FFmpeg thumbnail error at {ss}: {stderr.decode(errors='ignore').strip()}")
         except asyncio.TimeoutError:
             logger.error(f"FFmpeg thumbnail generation timed out for {video_path} at {ss}")
             if process:
@@ -301,16 +304,17 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL
+                    stderr=asyncio.subprocess.PIPE
                 )
             except Exception as e:
                 logger.error(f"Failed to start FFmpeg remux for {filepath}: {e}")
                 update_upload_status(conn, filepath, 'FAILED')
                 return
                 
+            stderr = None
             try:
                 # 增加 1800 秒超时控制，防止坏视频导致 Remux 卡死
-                await asyncio.wait_for(process.communicate(), timeout=1800)
+                _, stderr = await asyncio.wait_for(process.communicate(), timeout=1800)
             except asyncio.TimeoutError:
                 logger.error(f"FFmpeg remux timed out for {filepath}")
                 if process:
@@ -330,8 +334,10 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
             
             if process.returncode == 0 and os.path.exists(upload_target_path) and os.path.getsize(upload_target_path) > 0:
                 is_temp_mp4 = True
+                logger.info(f"Remux successful: {upload_target_path}")
             else:
-                logger.error(f"FFmpeg conversion failed for {filepath}. Falling back to uploading the raw file.")
+                err_msg = stderr.decode(errors='ignore').strip() if stderr else 'Unknown error'
+                logger.error(f"FFmpeg remux failed with code {process.returncode}: {err_msg}")
                 if os.path.exists(upload_target_path):
                     try: os.remove(upload_target_path)
                     except Exception: pass
@@ -406,15 +412,16 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             process = await asyncio.create_subprocess_exec(
                                 *cmd,
                                 stdout=asyncio.subprocess.DEVNULL,
-                                stderr=asyncio.subprocess.DEVNULL
+                                stderr=asyncio.subprocess.PIPE
                             )
                         except Exception as e:
                             logger.error(f"Failed to start FFmpeg split for {filepath}: {e}")
                             update_upload_status(conn, filepath, 'FAILED')
                             return
                             
+                        stderr = None
                         try:
-                            await asyncio.wait_for(process.communicate(), timeout=1800)
+                            _, stderr = await asyncio.wait_for(process.communicate(), timeout=1800)
                         except asyncio.TimeoutError:
                             logger.error(f"FFmpeg segment split timed out for {upload_target_path}")
                             if process:
@@ -432,7 +439,8 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             raise
                             
                         if process.returncode != 0:
-                            logger.error(f"FFmpeg segment split failed with code {process.returncode}")
+                            err_msg = stderr.decode(errors='ignore').strip() if stderr else 'Unknown error'
+                            logger.error(f"FFmpeg segment split failed with code {process.returncode}: {err_msg}")
                             break
                             
                         # Validate generated files
