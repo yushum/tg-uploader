@@ -8,6 +8,7 @@ import json
 import math
 import shutil
 import uuid
+import time
 from pathlib import Path
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -47,6 +48,9 @@ SESSION_NAME = os.getenv('SESSION_NAME', '/app/session/uploader')
 DB_PATH = os.getenv('DB_PATH', '/app/session/uploader.db')
 MAX_SPLIT_SIZE_MB = get_positive_int_env('MAX_SPLIT_SIZE_MB', 2000, minimum=50, maximum=4000)
 MAX_CONCURRENT_UPLOADS = get_positive_int_env('MAX_CONCURRENT_UPLOADS', 1, minimum=1, maximum=10)
+ARCHIVE_DIR = os.getenv('ARCHIVE_DIR', '').strip()
+ARCHIVE_MATCH = [item.strip().casefold() for item in os.getenv('ARCHIVE_MATCH', '').split(',') if item.strip()]
+ARCHIVE_RETENTION_DAYS = get_positive_int_env('ARCHIVE_RETENTION_DAYS', 30, minimum=1)
 CHECK_INTERVAL = 15  # File stability check interval in seconds
 
 # ---------------- Customization & Network ----------------
@@ -91,6 +95,7 @@ def init_db() -> sqlite3.Connection:
 
     # 关键健壮性修复：重启时，将所有因为意外中断而卡在 UPLOADING 状态的任务重置，让其能够被重新扫描上传
     conn.execute('UPDATE uploads SET status = "PENDING" WHERE status = "UPLOADING"')
+    conn.execute('UPDATE uploads SET status = "SPLIT_PART_PENDING" WHERE status = "UPLOADING_SPLIT_PART"')
     conn.commit()
     return conn
 
@@ -118,6 +123,81 @@ def get_upload_message_id(conn: sqlite3.Connection, dir_path: str, prefix_patter
     cursor = conn.execute('SELECT message_id FROM uploads WHERE filepath LIKE ? ESCAPE "\\" AND status = "COMPLETED" AND message_id IS NOT NULL', (safe_pattern,))
     row = cursor.fetchone()
     return row[0] if row else None
+
+# ---------------- Selective local archive ----------------
+def should_archive(filepath: str) -> bool:
+    """Return whether a source path matches one of the configured archive keywords."""
+    if not ARCHIVE_DIR or not ARCHIVE_MATCH:
+        return False
+    searchable_path = os.path.abspath(filepath).casefold()
+    return any(keyword in searchable_path for keyword in ARCHIVE_MATCH)
+
+def get_archive_path(filepath: str) -> Path:
+    """Preserve the source's path below WATCH_DIR inside ARCHIVE_DIR."""
+    source = Path(filepath).resolve()
+    watch_roots = [Path(d.strip()).resolve() for d in WATCH_DIR.split(',') if d.strip()]
+    for watch_root in watch_roots:
+        try:
+            relative = source.relative_to(watch_root)
+            # Avoid collisions when multiple watched roots are configured.
+            if len(watch_roots) > 1:
+                relative = Path(watch_root.name) / relative
+            return Path(ARCHIVE_DIR).resolve() / relative
+        except ValueError:
+            continue
+    return Path(ARCHIVE_DIR).resolve() / source.name
+
+def archive_source_file(filepath: str) -> str:
+    """Archive an original video, preferring a zero-copy hard link on the same filesystem."""
+    source = Path(filepath)
+    archive_path = get_archive_path(filepath)
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if archive_path.exists():
+        if archive_path.stat().st_size == source.stat().st_size:
+            logger.info(f"Archive already exists: {archive_path}")
+            return str(archive_path)
+        raise FileExistsError(f"Archive destination exists with a different size: {archive_path}")
+
+    try:
+        os.link(source, archive_path)
+        logger.info(f"Source archived with hard link: {source} -> {archive_path}")
+    except OSError as link_error:
+        logger.info(f"Hard-link archive unavailable ({link_error}); copying source to {archive_path}")
+        temporary_path = archive_path.with_name(f".{archive_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            shutil.copy2(source, temporary_path)
+            os.replace(temporary_path, archive_path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+        logger.info(f"Source archived by copy: {source} -> {archive_path}")
+    return str(archive_path)
+
+def _sync_prune_archive():
+    """Delete archived files older than the configured retention period and prune empty dirs."""
+    if not ARCHIVE_DIR or not ARCHIVE_MATCH:
+        return
+    archive_root = Path(ARCHIVE_DIR).resolve()
+    if not archive_root.exists():
+        return
+    cutoff = time.time() - ARCHIVE_RETENTION_DAYS * 86400
+    for root_dir, _, files in os.walk(archive_root, topdown=False):
+        root_path = Path(root_dir)
+        for filename in files:
+            archived_file = root_path / filename
+            try:
+                stat = archived_file.stat()
+                if max(stat.st_mtime, stat.st_ctime) < cutoff:
+                    archived_file.unlink()
+                    logger.info(f"Expired archive auto-cleaned: {archived_file}")
+            except OSError as e:
+                logger.warning(f"Could not inspect/remove archived file {archived_file}: {e}")
+        if root_path != archive_root:
+            try:
+                root_path.rmdir()
+            except OSError:
+                pass
 
 # ---------------- 视频处理模块 ----------------
 async def generate_thumbnail(video_path: str) -> str:
@@ -254,7 +334,20 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                 logger.warning(f"Cleanup for 0-byte file failed: {e}")
             return
             
-        update_upload_status(conn, filepath, 'UPLOADING')
+        initial_status = get_upload_status(conn, filepath)
+        # Preserve the complete original before remuxing, splitting, or burn-after-upload cleanup.
+        # Parts generated by this uploader are explicitly marked so they are not archived again.
+        if initial_status != 'SPLIT_PART_PENDING' and should_archive(filepath):
+            try:
+                await asyncio.to_thread(archive_source_file, filepath)
+            except Exception as archive_error:
+                logger.error(f"Failed to archive matched source {filepath}; upload cancelled to protect the original: {archive_error}")
+                update_upload_status(conn, filepath, 'FAILED')
+                fail_counts[filepath] = fail_counts.get(filepath, 0) + 1
+                return
+
+        uploading_status = 'UPLOADING_SPLIT_PART' if initial_status == 'SPLIT_PART_PENDING' else 'UPLOADING'
+        update_upload_status(conn, filepath, uploading_status)
         
         is_temp_mp4 = False
         upload_target_path = filepath
@@ -491,6 +584,8 @@ async def upload_file(client: TelegramClient, filepath: str, conn: sqlite3.Conne
                             split_successful = True
                             
                     if split_successful:
+                        for part_file in valid_files:
+                            update_upload_status(conn, part_file, 'SPLIT_PART_PENDING')
                         logger.info(f"Manual segment split successful for {filepath}. Removed original and yielding to radar.")
                         update_upload_status(conn, filepath, 'SKIPPED_FOR_SPLIT')
                         if os.path.exists(filepath):
@@ -743,6 +838,7 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
     fail_counts = {}
     # 全局并发锁：控制同时处于上传状态的文件数，可通过 MAX_CONCURRENT_UPLOADS 配置（高带宽服务器可适当调大）
     global_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
+    last_archive_prune = 0.0
     
     while is_running:
         try:
@@ -890,6 +986,11 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
             # --- 全局空文件夹修剪 (Global Empty Directory Pruning) ---
             # 无论什么原因产生的空文件夹，每 10 秒都会被自底向上彻底抹除，放入独立线程池防阻塞
             await asyncio.to_thread(_sync_global_prune, watch_dir_list)
+
+            # Archive retention cleanup is intentionally infrequent to avoid repeatedly walking large disks.
+            if ARCHIVE_DIR and time.monotonic() - last_archive_prune >= 3600:
+                await asyncio.to_thread(_sync_prune_archive)
+                last_archive_prune = time.monotonic()
                 
             await asyncio.sleep(10)  # 雷达每 10 秒扫一次
 
@@ -898,6 +999,16 @@ async def main():
     global MAX_SPLIT_SIZE_MB
     logger.info("Initializing SQLite database...")
     conn = init_db()
+
+    if ARCHIVE_DIR and ARCHIVE_MATCH:
+        archive_root = Path(ARCHIVE_DIR).resolve()
+        watch_roots = [Path(d.strip()).resolve() for d in WATCH_DIR.split(',') if d.strip()]
+        if any(archive_root == root or archive_root.is_relative_to(root) for root in watch_roots):
+            raise ValueError("ARCHIVE_DIR must be outside WATCH_DIR to prevent archived files from being uploaded again")
+        logger.info(
+            f"Selective archive enabled: dir={archive_root}, keywords={ARCHIVE_MATCH}, "
+            f"retention={ARCHIVE_RETENTION_DAYS} days"
+        )
     
     # 垃圾清理：清理上次异常崩溃可能遗留的临时转换文件和封面图
     logger.info("Cleaning up any orphaned temporary files...")

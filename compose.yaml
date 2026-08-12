@@ -27,9 +27,12 @@ services:
       # - MAX_CONCURRENT_UPLOADS=1    # Number of files uploading simultaneously (1-10)
       # - MAX_CONNECTIONS=20           # Number of parallel MTProto connections per file (1-32)
       # - MAX_SPLIT_SIZE_MB=2000       # Max file size before splitting, auto-detected by Premium status (50-4000)
+      # - ARCHIVE_DIR=/archive          # Keep matched original recordings outside WATCH_DIR
+      # - ARCHIVE_MATCH=永雏塔菲          # Comma-separated, case-insensitive path/filename keywords
+      # - ARCHIVE_RETENTION_DAYS=30     # Automatically remove older archived recordings
       
     volumes:
       - ./downloads:/downloads
       - ./session:/app/session
+      - ./archive:/archive
     stop_grace_period: 2m
-
