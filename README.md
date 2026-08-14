@@ -12,7 +12,7 @@ An industrial-grade, fully automated, and extremely fast video uploader for Tele
 *   **Non-Blocking Radar & Sequential Scheduler**: Scans the filesystem asynchronously. Groups video chunks together, respects customizable stability timeout periods (to prevent reading incomplete files while they are still being recorded), and uploads them in perfect chronological order.
 *   **OOM Defense & Rate Limit Handling**: Uses sliding memory-mapped windows to upload 40GB+ files without crashing the server. Automatically catches and sleeps through Telegram `FloodWaitError`s.
 *   **Auto-Cleanup & Pruning**: Implements a true "burn-after-reading" mechanism. Upon successful upload and SQLite logging, original files are deleted. Empty subdirectories are recursively pruned.
-*   **Selective Local Archive**: Retains complete originals matching streamer/path keywords before remuxing or Telegram splitting. Same-filesystem archives prefer hard links and expire automatically after a configurable retention period.
+*   **Selective Local Archive**: Retains complete, directly playable MP4 files matching streamer/path keywords before Telegram splitting. Stream formats are losslessly remuxed first; native MP4 files are archived directly. Same-filesystem archives prefer hard links and expire automatically after a configurable retention period.
 
 ---
 
@@ -70,7 +70,7 @@ Start the unattended watcher in the background:
 docker compose up -d
 ```
 
-The included Compose file mounts host directory `./archive` at `/archive`; set the three archive variables above to enable the feature. `ARCHIVE_DIR` must remain outside `WATCH_DIR`, or archived files would be scanned again. Matching is a case-insensitive substring check against the complete source path. If archive settings are omitted, the existing upload-and-delete behavior is unchanged.
+The included Compose file mounts host directory `./archive` at `/archive`; set the three archive variables above to enable the feature. `ARCHIVE_DIR` must remain outside `WATCH_DIR`, or archived files would be scanned again. Matching is a case-insensitive substring check against the complete source path. Matching `.ts`, `.flv`, and `.mkv` files are losslessly remuxed and archived under the same relative path with an `.mp4` extension before any Telegram splitting. If archive settings are omitted, the existing upload-and-delete behavior is unchanged.
 
 ---
 

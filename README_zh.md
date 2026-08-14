@@ -74,7 +74,7 @@ docker compose up -d
 
 ### 5. 启用选择性归档
 
-`compose.yaml` 已将宿主机的 `./archive` 挂载到容器的 `/archive`。在 `.env` 中设置上面三个变量即可启用。`ARCHIVE_MATCH` 会对文件的完整路径做不区分大小写的子串匹配。匹配的视频会在转封装或 Telegram 切割前归档，因此保留的是完整原片。
+`compose.yaml` 已将宿主机的 `./archive` 挂载到容器的 `/archive`。在 `.env` 中设置上面三个变量即可启用。`ARCHIVE_MATCH` 会对文件的完整路径做不区分大小写的子串匹配。匹配的 `.ts`、`.flv`、`.mkv` 会先无损转封装，再将完整 MP4 归档；原生 MP4 会直接归档。归档发生在 Telegram 切割前，因此不会保存成 Telegram 分片。
 
 > `ARCHIVE_DIR` 必须位于 `WATCH_DIR` 之外，否则归档文件会被重复扫描。不配置归档变量时，原有的上传后自动删除行为保持不变。
 
