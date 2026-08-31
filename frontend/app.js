@@ -61,12 +61,27 @@ async function getSessions(channel, date) {
   return state.sessions.get(key);
 }
 
+function setScrollPosition(top) {
+  const root = document.documentElement;
+  const previous = root.style.scrollBehavior;
+  root.style.scrollBehavior = 'auto';
+  root.scrollTop = top;
+  if (document.body) document.body.scrollTop = top;
+  return () => { root.style.scrollBehavior = previous; };
+}
+
 function navigate(path, replace = false, source = null) {
+  let restoreScrollBehavior = () => {};
   const update = async () => {
-    history[replace ? 'replaceState' : 'pushState'](null, '', path);
+    history.replaceState({ ...(history.state || {}), scrollY: window.scrollY }, '', location.href);
+    history[replace ? 'replaceState' : 'pushState']({ scrollY: 0 }, '', path);
+    restoreScrollBehavior = setScrollPosition(0);
     await route();
   };
-  if (!document.startViewTransition) { update(); return; }
+  if (!document.startViewTransition) {
+    update().finally(() => requestAnimationFrame(restoreScrollBehavior));
+    return;
+  }
   try { state.viewTransition?.skipTransition(); } catch (_) {}
   const channelSource = source?.matches('[data-open-channel]') ? source.querySelector('img') : null;
   const watchSource = source?.matches('.date-card,[data-transition="watch"]') ? source : null;
@@ -76,6 +91,7 @@ function navigate(path, replace = false, source = null) {
   if (transitionSource && state.transitionName) transitionSource.style.viewTransitionName = state.transitionName;
   const transition = document.startViewTransition(update);
   state.viewTransition = transition;
+  transition.ready.finally(() => restoreScrollBehavior());
   transition.finished.finally(() => {
     if (transitionSource) transitionSource.style.viewTransitionName = '';
     document.querySelector('.channel-avatar img')?.style.removeProperty('view-transition-name');
@@ -354,7 +370,7 @@ function selectSession(sessions, index, autoplay, partIndex = null) {
   state.activeFavorite = { message_id: sessionAnchor.message_id, channel: state.channel, date: state.date, time: session.time.slice(0, 5), duration: session.total_duration };
   const url = new URL(location.href);
   url.searchParams.set('session', sessionAnchor.message_id);
-  history.replaceState(null, '', `${url.pathname}${url.search}`);
+  history.replaceState({ ...(history.state || {}), scrollY: window.scrollY }, '', `${url.pathname}${url.search}`);
   syncFavoriteButton();
   document.querySelector(`.session-item[data-session-index="${index}"]`)?.scrollIntoView({ behavior: autoplay ? 'smooth' : 'auto', block: 'nearest' });
 }
@@ -511,9 +527,18 @@ themeMenu.addEventListener('click', event => { const choice = event.target.close
 document.addEventListener('click', event => { if (!event.target.closest('.theme-picker')) { themeMenu.hidden = true; themeButton.setAttribute('aria-expanded', 'false'); } });
 document.addEventListener('keydown', event => { if (event.key === 'Escape') themeMenu.hidden = true; });
 systemTheme.addEventListener('change', () => { if (document.documentElement.dataset.themeMode === 'auto') applyTheme('auto', false); });
-window.addEventListener('popstate', () => {
-  if (document.startViewTransition) document.startViewTransition(() => route());
-  else route();
+window.addEventListener('popstate', event => {
+  let restoreScrollBehavior = () => {};
+  const update = async () => {
+    restoreScrollBehavior = setScrollPosition(Number(event.state?.scrollY) || 0);
+    await route();
+  };
+  if (document.startViewTransition) {
+    const transition = document.startViewTransition(update);
+    transition.ready.finally(() => restoreScrollBehavior());
+  } else update().finally(() => requestAnimationFrame(restoreScrollBehavior));
 });
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+if (!history.state || !Number.isFinite(history.state.scrollY)) history.replaceState({ ...(history.state || {}), scrollY: window.scrollY }, '', location.href);
 applyTheme(document.documentElement.dataset.themeMode || 'auto', false);
 route();
