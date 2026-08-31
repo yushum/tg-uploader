@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN" data-player-library-only>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f5f7">
+  <title>Replay · 直播影像馆</title>
+  <script>
+    (() => {
+      const mode = localStorage.getItem('replay-theme') || localStorage.getItem('replay-demo-theme') || 'auto';
+      const dark = mode === 'dark' || (mode === 'auto' && matchMedia('(prefers-color-scheme:dark)').matches);
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      document.documentElement.dataset.themeMode = mode;
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/app.css?v=20260901-player-library">
+  <link rel="stylesheet" href="/style.css?v=5">
+</head>
+<body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/" data-link aria-label="返回首页">
+        <span class="brand-glyph"><svg viewBox="0 0 24 24"><path d="m9.2 7.4 7.2 4.6-7.2 4.6V7.4Z"/></svg></span><span>Replay</span>
+      </a>
+      <nav class="primary-nav" aria-label="主导航"><a href="/" data-link data-nav="home">首页</a><a href="/streamers" data-link data-nav="streamers">主播</a><a href="/favorites" data-link data-nav="favorites">收藏</a></nav>
+      <nav class="crumbs" aria-label="当前位置"></nav>
+      <form class="global-search" role="search">
+        <svg viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <input type="search" placeholder="搜索所有主播" autocomplete="off" aria-label="搜索所有主播">
+      </form>
+      <div class="theme-picker">
+        <button class="theme-button" type="button" aria-haspopup="menu" aria-expanded="false"><span class="theme-symbol"></span><span class="theme-label">自动</span></button>
+        <div class="theme-menu" role="menu" hidden>
+          <button type="button" data-theme-choice="auto"><span>◐</span><span>自动</span><i>跟随系统</i><b>✓</b></button>
+          <button type="button" data-theme-choice="light"><span>☀</span><span>浅色</span><b>✓</b></button>
+          <button type="button" data-theme-choice="dark"><span>●</span><span>深色</span><b>✓</b></button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main id="app"><div class="initial-loading"><i></i><span>正在整理录像馆…</span></div></main>
+
+  <div class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=20260901-player-library"></script>
+  <script type="module" src="/app.js?v=5"></script>
+</body>
+</html>

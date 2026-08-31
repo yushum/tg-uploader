@@ -41,8 +41,13 @@ class FakeTelegram:
 class MediaCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_streamer_history_route_returns_spa(self):
         response = await web_app.streamer_page("susu/2026-08-01")
-        self.assertEqual(Path(response.path), web_app.STATIC_DIR / "index.html")
+        self.assertEqual(Path(response.path), web_app.FRONTEND_DIR / "index.html")
         self.assertEqual(response.headers["Cache-Control"], "no-cache")
+
+    async def test_top_level_history_routes_return_spa(self):
+        for response in (await web_app.index(), await web_app.design_page()):
+            self.assertEqual(Path(response.path), web_app.FRONTEND_DIR / "index.html")
+            self.assertEqual(response.headers["Cache-Control"], "no-cache")
 
     async def test_concurrent_read_downloads_block_once_then_hits_cache(self):
         data = bytes((index % 251 for index in range(web_app.MEDIA_CACHE_BLOCK_SIZE + 37)))

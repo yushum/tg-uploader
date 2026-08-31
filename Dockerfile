@@ -38,5 +38,6 @@ RUN pip install --no-cache /wheels/*
 
 COPY *.py .
 COPY web ./web
+COPY frontend ./frontend
 
 CMD ["python", "uploader.py"]

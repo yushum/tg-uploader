@@ -8,6 +8,7 @@ on:
       - '.github/workflows/docker-publish.yml'
       - '**.py'
       - 'web/**'
+      - 'frontend/**'
       - 'Dockerfile'
       - 'requirements.txt'
     tags: [ 'v*.*.*' ]
@@ -17,6 +18,7 @@ on:
       - '.github/workflows/docker-publish.yml'
       - '**.py'
       - 'web/**'
+      - 'frontend/**'
       - 'Dockerfile'
       - 'requirements.txt'
 

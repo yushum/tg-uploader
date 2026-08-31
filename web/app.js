@@ -26,6 +26,19 @@ const playerIcons = {
   fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>',
   fullscreenExit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></svg>'
 };
+const legacyUiEnabled = !document.documentElement.hasAttribute('data-player-library-only');
+
+function playerDuration(seconds) {
+  if (!seconds) return '时长未知';
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  return hours > 0
+    ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+if (legacyUiEnabled) {
 let themeMode = localStorage.getItem('theme-mode') || 'auto';
 if (!themeNames[themeMode]) themeMode = themeMode === 'oled' ? 'dark' : 'auto';
 let activePlayer = null;
@@ -407,11 +420,14 @@ async function renderDate(streamer, date) {
   list.querySelectorAll('.session-card').forEach(card => card.addEventListener('click', () => selectSession(Number(card.dataset.session))));
   selectSession(0);
 }
+}
 
 class MergedPlayer {
-  constructor(mount, session) {
+  constructor(mount, session, options = {}) {
     this.mount = mount;
     this.parts = session.parts.filter(part => part.available);
+    this.onEnded = typeof options.onEnded === 'function' ? options.onEnded : null;
+    this.onPartChange = typeof options.onPartChange === 'function' ? options.onPartChange : null;
     this.index = 0;
     this.destroyed = false;
     this.listeners = [];
@@ -488,9 +504,14 @@ class MergedPlayer {
     this.restorePreferences();
     this.recalculate();
     if (this.parts.length) {
-      const savedPosition = this.readSavedPosition();
-      const target = this.resolveTime(savedPosition);
-      this.loadPart(target.index, target.localTime, false);
+      if (Number.isInteger(options.startPartIndex)) {
+        const startPartIndex = Math.max(0, Math.min(options.startPartIndex, this.parts.length - 1));
+        this.loadPart(startPartIndex, 0, Boolean(options.autoplay));
+      } else {
+        const savedPosition = this.readSavedPosition();
+        const target = this.resolveTime(savedPosition);
+        this.loadPart(target.index, target.localTime, Boolean(options.autoplay));
+      }
     }
   }
 
@@ -553,6 +574,7 @@ class MergedPlayer {
         this.setState('ended');
         this.syncPlayButtons();
         try { localStorage.removeItem(this.sessionKey); } catch (_) {}
+        this.onEnded?.();
       }
     });
 
@@ -626,6 +648,7 @@ class MergedPlayer {
     this.video.src = source;
     this.video.load();
     this.partIndicator.textContent = `第 ${index + 1} / ${this.parts.length} 段`;
+    this.onPartChange?.(index, this.parts.length);
   }
 
   seek(globalTime) {
@@ -637,7 +660,7 @@ class MergedPlayer {
       this.video.currentTime = Math.min(target.localTime, Math.max(0, this.video.duration - .05));
       if (autoplay) this.attemptPlay(this.loadGeneration);
     } else this.loadPart(target.index, target.localTime, autoplay);
-    this.showToast(`跳转到 ${formatDuration(globalTime).replace('时长未知', '00:00')}`);
+    this.showToast(`跳转到 ${playerDuration(globalTime).replace('时长未知', '00:00')}`);
   }
 
   seekBy(delta) {
@@ -654,7 +677,7 @@ class MergedPlayer {
   updateProgress() {
     const current = this.globalCurrentTime();
     if (this.timeline && !this.scrubbing) this.timeline.value = Math.min(current, this.total || 1);
-    if (this.timeLabel) this.timeLabel.textContent = `${formatDuration(current).replace('时长未知', '00:00')} / ${formatDuration(this.total).replace('时长未知', '00:00')}`;
+    if (this.timeLabel) this.timeLabel.textContent = `${playerDuration(current).replace('时长未知', '00:00')} / ${playerDuration(this.total).replace('时长未知', '00:00')}`;
     const played = this.total ? Math.min(100, current / this.total * 100) : 0;
     this.timeline?.style.setProperty('--played', `${played}%`);
     this.updateBuffered();
@@ -688,9 +711,9 @@ class MergedPlayer {
   }
 
   previewSeek(value) {
-    const label = formatDuration(value).replace('时长未知', '00:00');
+    const label = playerDuration(value).replace('时长未知', '00:00');
     this.timelinePreview.textContent = label;
-    this.timeLabel.textContent = `${label} / ${formatDuration(this.total).replace('时长未知', '00:00')}`;
+    this.timeLabel.textContent = `${label} / ${playerDuration(this.total).replace('时长未知', '00:00')}`;
     const ratio = this.total ? value / this.total : 0;
     this.timelinePreview.style.left = `${Math.min(98, Math.max(2, ratio * 100))}%`;
     this.timeline.style.setProperty('--played', `${ratio * 100}%`);
@@ -1009,6 +1032,9 @@ class MergedPlayer {
   }
 }
 
+window.ReplayMergedPlayer = MergedPlayer;
+
+if (legacyUiEnabled) {
 async function route() {
   if (activePlayer) { activePlayer.destroy(); activePlayer = null; }
   homeRenderer = null;
@@ -1026,3 +1052,4 @@ async function route() {
 migrateLegacyHashRoute();
 window.addEventListener('popstate', route);
 route();
+}

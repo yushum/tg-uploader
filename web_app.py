@@ -31,6 +31,7 @@ UPLOADER_SESSION_NAME = os.getenv("UPLOADER_SESSION_NAME", "/app/session/uploade
 WEB_SESSION_NAME = os.getenv("WEB_SESSION_NAME", "/app/session/web")
 MAX_STREAMS = max(1, min(int(os.getenv("MAX_STREAMS", "4")), 16))
 STATIC_DIR = Path(__file__).resolve().parent / "web"
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 MEDIA_CACHE_DIR = Path(os.getenv("MEDIA_CACHE_DIR", "/tmp/tg-uploader-media-cache"))
 MEDIA_CACHE_MAX_BYTES = max(64, int(os.getenv("MEDIA_CACHE_MAX_MB", "1024"))) * 1024 * 1024
 MEDIA_CACHE_BLOCK_SIZE = 512 * 1024
@@ -146,12 +147,28 @@ async def _get_message(message_id: int):
 
 @app.get("/", include_in_schema=False)
 async def index():
-    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    return FileResponse(FRONTEND_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/app.js", include_in_schema=False)
+async def design_app_script():
+    return FileResponse(FRONTEND_DIR / "app.js", media_type="text/javascript")
+
+
+@app.get("/style.css", include_in_schema=False)
+async def design_app_style():
+    return FileResponse(FRONTEND_DIR / "style.css", media_type="text/css")
+
+
+@app.get("/streamers", include_in_schema=False)
+@app.get("/favorites", include_in_schema=False)
+async def design_page():
+    return FileResponse(FRONTEND_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/streamer/{path:path}", include_in_schema=False)
 async def streamer_page(path: str):
-    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    return FileResponse(FRONTEND_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/healthz", include_in_schema=False)
