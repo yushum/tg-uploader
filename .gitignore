@@ -15,6 +15,7 @@ __pycache__/
 # Application data
 session/
 downloads/
+cache/
 
 # C extensions
 *.so

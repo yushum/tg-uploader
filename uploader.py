@@ -281,7 +281,9 @@ async def get_video_attributes(video_path: str):
             streams = info.get('streams', [])
             width = int(streams[0].get('width', 0)) if streams else 0
             height = int(streams[0].get('height', 0)) if streams else 0
-            duration = int(float(info.get('format', {}).get('duration', 0)))
+            # Telegram accepts a floating-point duration. Preserve it so the web
+            # player can build an accurate timeline across many recording parts.
+            duration = float(info.get('format', {}).get('duration', 0) or 0)
             
             return width, height, duration
         except asyncio.TimeoutError:

@@ -18,9 +18,13 @@ const themeIcons = {
 const playerIcons = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5V7Z"/></svg>',
   pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7v10M15 7v10"/></svg>',
+  backward: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H4V2M4.7 7.2A8.5 8.5 0 1 1 3.5 15"/></svg>',
+  forward: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7h5V2M19.3 7.2A8.5 8.5 0 1 0 20.5 15"/></svg>',
   volume: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6 7 10H4v4h3l4 4V6ZM15 9a4 4 0 0 1 0 6M17.5 6.5a8 8 0 0 1 0 11"/></svg>',
   muted: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6 7 10H4v4h3l4 4V6ZM16 10l4 4M20 10l-4 4"/></svg>',
-  fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>'
+  pip: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 12h7v5h-7z"/></svg>',
+  fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>',
+  fullscreenExit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></svg>'
 };
 let themeMode = localStorage.getItem('theme-mode') || 'auto';
 if (!themeNames[themeMode]) themeMode = themeMode === 'oled' ? 'dark' : 'auto';
@@ -386,67 +390,185 @@ class MergedPlayer {
     this.parts = session.parts.filter(part => part.available);
     this.index = 0;
     this.destroyed = false;
+    this.listeners = [];
+    this.loadGeneration = 0;
+    this.pendingLoad = null;
+    this.intendedPlaying = false;
+    this.scrubbing = false;
+    this.retryCount = 0;
+    this.lastPositionSave = 0;
+    this.sessionKey = `player-position:${this.parts.map(part => part.message_id).join('-')}`;
     const posterId = this.parts[0]?.message_id;
     this.mount.innerHTML = `
-      <div class="player-shell">
+      <div class="player-shell show-controls" tabindex="0" data-player-state="idle">
         <div class="video-stage">
-          <video playsinline preload="none"${posterId ? ` poster="/api/thumbnail/${posterId}"` : ''}></video>
+          <video playsinline preload="metadata"${posterId ? ` poster="/api/thumbnail/${posterId}"` : ''}></video>
           <div class="video-placeholder"><strong>${this.parts.length ? '点击播放' : '录像不可用'}</strong><span>${this.parts.length ? '视频直接从 Telegram 读取' : '频道消息可能已被删除'}</span></div>
+          <div class="player-gesture-layer" aria-hidden="true"></div>
+          <button class="center-play" type="button" aria-label="播放">${playerIcons.play}</button>
+          <div class="player-spinner" role="status" aria-label="正在缓冲"><span></span></div>
+          <div class="player-toast" role="status" aria-live="polite"></div>
+          <div class="player-error" hidden>
+            <strong>播放遇到问题</strong>
+            <span>可以重试当前进度，或跳到附近位置。</span>
+            <button type="button">重试</button>
+          </div>
         </div>
         <div class="player-controls">
-          <button class="player-button play-button" type="button" aria-label="播放">${playerIcons.play}</button>
-          <input class="timeline" type="range" min="0" max="1" value="0" step="0.1" aria-label="播放进度">
-          <span class="player-time">00:00 / 00:00</span>
-          <span class="part-indicator">第 1 / ${Math.max(1, this.parts.length)} 段</span>
-          <select class="rate-select" aria-label="播放速度">
-            <option value="0.75">0.75×</option><option value="1" selected>1×</option>
-            <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
-          </select>
-          <button class="player-button mute-button" type="button" aria-label="静音">${playerIcons.volume}</button>
-          <button class="player-button fullscreen-button" type="button" aria-label="全屏">${playerIcons.fullscreen}</button>
+          <div class="timeline-wrap">
+            <div class="timeline-buffer"></div>
+            <input class="timeline" type="range" min="0" max="1" value="0" step="0.05" aria-label="播放进度">
+            <output class="timeline-preview">00:00</output>
+          </div>
+          <div class="control-row">
+            <button class="player-button play-button" type="button" aria-label="播放">${playerIcons.play}</button>
+            <button class="player-button skip-button backward-button" type="button" aria-label="后退 10 秒">${playerIcons.backward}<span>10</span></button>
+            <button class="player-button skip-button forward-button" type="button" aria-label="前进 10 秒">${playerIcons.forward}<span>10</span></button>
+            <span class="player-time">00:00 / 00:00</span>
+            <span class="part-indicator">第 1 / ${Math.max(1, this.parts.length)} 段</span>
+            <span class="control-spacer"></span>
+            <div class="volume-control">
+              <button class="player-button mute-button" type="button" aria-label="静音">${playerIcons.volume}</button>
+              <input class="volume-slider" type="range" min="0" max="1" value="1" step="0.02" aria-label="音量">
+            </div>
+            <select class="rate-select" aria-label="播放速度">
+              <option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option><option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option><option value="1.75">1.75×</option>
+              <option value="2">2×</option><option value="2.5">2.5×</option><option value="3">3×</option>
+            </select>
+            <button class="player-button pip-button" type="button" aria-label="画中画">${playerIcons.pip}</button>
+            <button class="player-button fullscreen-button" type="button" aria-label="全屏">${playerIcons.fullscreen}</button>
+          </div>
         </div>
       </div>`;
     this.root = mount.querySelector('.player-shell');
     this.video = mount.querySelector('video');
     this.placeholder = mount.querySelector('.video-placeholder');
+    this.gestureLayer = mount.querySelector('.player-gesture-layer');
+    this.centerPlay = mount.querySelector('.center-play');
+    this.toast = mount.querySelector('.player-toast');
+    this.errorPanel = mount.querySelector('.player-error');
     this.playButton = mount.querySelector('.play-button');
     this.timeline = mount.querySelector('.timeline');
+    this.timelineBuffer = mount.querySelector('.timeline-buffer');
+    this.timelinePreview = mount.querySelector('.timeline-preview');
     this.timeLabel = mount.querySelector('.player-time');
     this.partIndicator = mount.querySelector('.part-indicator');
+    this.rateSelect = mount.querySelector('.rate-select');
+    this.volumeSlider = mount.querySelector('.volume-slider');
+    this.muteButton = mount.querySelector('.mute-button');
+    this.pipButton = mount.querySelector('.pip-button');
+    this.fullscreenButton = mount.querySelector('.fullscreen-button');
     this.bind();
+    this.restorePreferences();
     this.recalculate();
-    if (this.parts.length) this.loadPart(0, 0, false);
+    if (this.parts.length) {
+      const savedPosition = this.readSavedPosition();
+      const target = this.resolveTime(savedPosition);
+      this.loadPart(target.index, target.localTime, false);
+    }
+  }
+
+  listen(target, event, handler, options) {
+    target.addEventListener(event, handler, options);
+    this.listeners.push(() => target.removeEventListener(event, handler, options));
   }
 
   bind() {
-    this.togglePlay = () => this.video.paused ? this.video.play().catch(() => {}) : this.video.pause();
-    this.playButton.addEventListener('click', this.togglePlay);
-    this.video.addEventListener('click', this.togglePlay);
-    this.video.addEventListener('play', () => { this.playButton.innerHTML = playerIcons.pause; this.placeholder.hidden = true; });
-    this.video.addEventListener('pause', () => { this.playButton.innerHTML = playerIcons.play; });
-    this.video.addEventListener('timeupdate', () => this.updateProgress());
-    this.video.addEventListener('durationchange', () => {
-      if (Number.isFinite(this.video.duration) && this.video.duration > 0 && !this.parts[this.index].duration) {
-        this.parts[this.index].duration = this.video.duration;
-        this.recalculate();
+    this.listen(this.playButton, 'click', () => this.togglePlay());
+    this.listen(this.centerPlay, 'click', () => this.togglePlay());
+    this.listen(this.mount.querySelector('.backward-button'), 'click', () => this.seekBy(-10));
+    this.listen(this.mount.querySelector('.forward-button'), 'click', () => this.seekBy(10));
+    this.listen(this.errorPanel.querySelector('button'), 'click', () => this.retry());
+
+    this.listen(this.video, 'loadstart', () => this.setState('loading', '正在读取录像…'));
+    this.listen(this.video, 'loadedmetadata', () => this.handleMetadata());
+    this.listen(this.video, 'canplay', () => {
+      if (!this.pendingLoad && this.video.paused) this.setState('ready');
+    });
+    this.listen(this.video, 'play', () => {
+      this.intendedPlaying = true;
+      this.placeholder.hidden = true;
+      this.errorPanel.hidden = true;
+      this.syncPlayButtons();
+    });
+    this.listen(this.video, 'playing', () => {
+      this.retryCount = 0;
+      this.setState('playing');
+      this.scheduleControlsHide();
+    });
+    this.listen(this.video, 'pause', () => {
+      if (!this.pendingLoad) this.setState('paused');
+      this.syncPlayButtons();
+      this.showControls();
+      this.savePosition();
+    });
+    this.listen(this.video, 'timeupdate', () => this.updateProgress());
+    this.listen(this.video, 'progress', () => this.updateBuffered());
+    this.listen(this.video, 'durationchange', () => this.updatePartDuration());
+    this.listen(this.video, 'seeking', () => this.setState('seeking', '正在跳转…'));
+    this.listen(this.video, 'seeked', () => {
+      if (this.pendingLoad) this.finishPendingLoad();
+      else this.setState(this.video.paused ? 'paused' : 'playing');
+      this.updateProgress();
+    });
+    this.listen(this.video, 'waiting', () => {
+      if (this.intendedPlaying) this.setState('buffering', '正在缓冲…');
+      this.scheduleRecovery();
+    });
+    this.listen(this.video, 'stalled', () => {
+      this.setState('buffering', '网络读取停滞，正在恢复…');
+      this.scheduleRecovery();
+    });
+    this.listen(this.video, 'error', () => this.handleMediaError());
+    this.listen(this.video, 'ended', () => {
+      if (this.index < this.parts.length - 1) this.loadPart(this.index + 1, 0, true);
+      else {
+        this.intendedPlaying = false;
+        this.setState('ended');
+        this.syncPlayButtons();
+        try { localStorage.removeItem(this.sessionKey); } catch (_) {}
       }
     });
-    this.video.addEventListener('ended', () => {
-      if (this.index < this.parts.length - 1) this.loadPart(this.index + 1, 0, true);
+
+    this.listen(this.timeline, 'pointerdown', () => {
+      this.scrubbing = true;
+      this.root.classList.add('is-scrubbing');
+      this.showControls();
     });
-    this.timeline.addEventListener('input', () => {
-      this.timeLabel.textContent = `${formatDuration(Number(this.timeline.value)).replace('时长未知', '00:00')} / ${formatDuration(this.total).replace('时长未知', '00:00')}`;
+    this.listen(this.timeline, 'input', () => this.previewSeek(Number(this.timeline.value)));
+    this.listen(this.timeline, 'change', () => {
+      this.scrubbing = false;
+      this.root.classList.remove('is-scrubbing');
+      this.seek(Number(this.timeline.value));
     });
-    this.timeline.addEventListener('change', () => this.seek(Number(this.timeline.value)));
-    this.mount.querySelector('.rate-select').addEventListener('change', event => { this.video.playbackRate = Number(event.target.value); });
-    this.mount.querySelector('.mute-button').addEventListener('click', event => {
+    this.listen(this.timeline, 'pointerup', () => this.root.classList.remove('is-scrubbing'));
+
+    this.listen(this.rateSelect, 'change', event => this.setRate(Number(event.target.value), true));
+    this.listen(this.volumeSlider, 'input', event => this.setVolume(Number(event.target.value)));
+    this.listen(this.muteButton, 'click', () => {
       this.video.muted = !this.video.muted;
-      event.currentTarget.innerHTML = this.video.muted ? playerIcons.muted : playerIcons.volume;
+      this.persistPreferences();
+      this.syncVolume();
     });
-    this.mount.querySelector('.fullscreen-button').addEventListener('click', () => {
-      if (this.root.requestFullscreen) this.root.requestFullscreen();
-      else if (this.video.webkitEnterFullscreen) this.video.webkitEnterFullscreen();
-    });
+    this.listen(this.pipButton, 'click', () => this.togglePictureInPicture());
+    this.listen(this.fullscreenButton, 'click', () => this.toggleFullscreen());
+    this.listen(document, 'fullscreenchange', () => this.syncFullscreen());
+    this.listen(document, 'webkitfullscreenchange', () => this.syncFullscreen());
+
+    this.listen(this.root, 'pointermove', () => this.showControls());
+    this.listen(this.root, 'pointerleave', () => this.scheduleControlsHide());
+    this.listen(this.root, 'focusin', () => this.showControls());
+    this.listen(this.gestureLayer, 'click', event => this.handleGestureClick(event));
+    this.listen(this.gestureLayer, 'pointerdown', event => this.handleLongPressStart(event));
+    this.listen(this.gestureLayer, 'pointerup', () => this.handleLongPressEnd());
+    this.listen(this.gestureLayer, 'pointercancel', () => this.handleLongPressEnd());
+    this.listen(this.gestureLayer, 'pointerleave', () => this.handleLongPressEnd());
+    this.listen(document, 'keydown', event => this.handleKeydown(event));
+
+    if (!document.pictureInPictureEnabled || !this.video.requestPictureInPicture) this.pipButton.hidden = true;
+    this.setupMediaSession();
   }
 
   recalculate() {
@@ -458,40 +580,406 @@ class MergedPlayer {
     this.updateProgress();
   }
 
+  resolveTime(globalTime) {
+    const safeTime = Math.max(0, Math.min(Number(globalTime) || 0, Math.max(0, this.total - .05)));
+    let index = Math.max(0, this.parts.length - 1);
+    for (let candidate = 0; candidate < this.parts.length; candidate++) {
+      const end = this.offsets[candidate] + Number(this.parts[candidate].duration || 0);
+      if (safeTime < end || candidate === this.parts.length - 1) { index = candidate; break; }
+    }
+    return { index, localTime: Math.max(0, safeTime - (this.offsets[index] || 0)) };
+  }
+
   loadPart(index, localTime = 0, autoplay = false) {
     if (this.destroyed || !this.parts[index]) return;
+    const generation = ++this.loadGeneration;
     this.index = index;
-    this.video.src = `/api/media/${this.parts[index].message_id}`;
+    this.intendedPlaying = autoplay;
+    const source = new URL(`/api/media/${this.parts[index].message_id}`, location.href).href;
+    this.pendingLoad = { generation, index, localTime, autoplay, source };
+    this.setState('loading', '正在读取录像…');
+    this.video.pause();
+    this.video.src = source;
     this.video.load();
     this.partIndicator.textContent = `第 ${index + 1} / ${this.parts.length} 段`;
-    const ready = () => {
-      this.video.currentTime = Math.min(localTime, Math.max(0, this.video.duration - .05));
-      if (autoplay) this.video.play().catch(() => {});
-    };
-    this.video.addEventListener('loadedmetadata', ready, { once: true });
   }
 
   seek(globalTime) {
     if (!this.parts.length) return;
-    let targetIndex = this.parts.length - 1;
-    for (let index = 0; index < this.parts.length; index++) {
-      const end = this.offsets[index] + Number(this.parts[index].duration || 0);
-      if (globalTime < end || index === this.parts.length - 1) { targetIndex = index; break; }
-    }
-    const localTime = Math.max(0, globalTime - this.offsets[targetIndex]);
-    const autoplay = !this.video.paused;
-    if (targetIndex === this.index && this.video.readyState > 0) this.video.currentTime = localTime;
-    else this.loadPart(targetIndex, localTime, autoplay);
+    const target = this.resolveTime(globalTime);
+    const autoplay = this.intendedPlaying || !this.video.paused;
+    if (target.index === this.index && this.video.readyState > 0 && !this.pendingLoad) {
+      this.setState('seeking', '正在跳转…');
+      this.video.currentTime = Math.min(target.localTime, Math.max(0, this.video.duration - .05));
+      if (autoplay) this.attemptPlay(this.loadGeneration);
+    } else this.loadPart(target.index, target.localTime, autoplay);
+    this.showToast(`跳转到 ${formatDuration(globalTime).replace('时长未知', '00:00')}`);
+  }
+
+  seekBy(delta) {
+    const current = this.globalCurrentTime();
+    const target = Math.max(0, Math.min(this.total || 0, current + delta));
+    this.seek(target);
+    this.showToast(`${delta > 0 ? '快进' : '后退'} ${Math.abs(delta)} 秒`);
+  }
+
+  globalCurrentTime() {
+    return (this.offsets?.[this.index] || 0) + (Number(this.video?.currentTime) || 0);
   }
 
   updateProgress() {
-    const current = (this.offsets?.[this.index] || 0) + (Number(this.video?.currentTime) || 0);
-    if (this.timeline) this.timeline.value = Math.min(current, this.total || 1);
+    const current = this.globalCurrentTime();
+    if (this.timeline && !this.scrubbing) this.timeline.value = Math.min(current, this.total || 1);
     if (this.timeLabel) this.timeLabel.textContent = `${formatDuration(current).replace('时长未知', '00:00')} / ${formatDuration(this.total).replace('时长未知', '00:00')}`;
+    const played = this.total ? Math.min(100, current / this.total * 100) : 0;
+    this.timeline?.style.setProperty('--played', `${played}%`);
+    this.updateBuffered();
+    if (Math.abs(current - this.lastPositionSave) >= 5) {
+      this.lastPositionSave = current;
+      this.savePosition();
+    }
+    if ('mediaSession' in navigator && Number.isFinite(this.video.duration) && this.video.duration > 0) {
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: this.total || this.video.duration,
+          playbackRate: this.video.playbackRate,
+          position: Math.min(current, (this.total || this.video.duration) - .01)
+        });
+      } catch (_) {}
+    }
+  }
+
+  updateBuffered() {
+    if (!this.timelineBuffer || !this.video?.buffered?.length || !this.total) return;
+    let localEnd = 0;
+    const current = Number(this.video.currentTime) || 0;
+    for (let index = 0; index < this.video.buffered.length; index++) {
+      if (current >= this.video.buffered.start(index) - .2 && current <= this.video.buffered.end(index) + .2) {
+        localEnd = this.video.buffered.end(index);
+        break;
+      }
+    }
+    const globalEnd = (this.offsets[this.index] || 0) + localEnd;
+    this.timelineBuffer.style.width = `${Math.min(100, globalEnd / this.total * 100)}%`;
+  }
+
+  previewSeek(value) {
+    const label = formatDuration(value).replace('时长未知', '00:00');
+    this.timelinePreview.textContent = label;
+    this.timeLabel.textContent = `${label} / ${formatDuration(this.total).replace('时长未知', '00:00')}`;
+    const ratio = this.total ? value / this.total : 0;
+    this.timelinePreview.style.left = `${Math.min(98, Math.max(2, ratio * 100))}%`;
+    this.timeline.style.setProperty('--played', `${ratio * 100}%`);
+  }
+
+  handleMetadata() {
+    this.updatePartDuration();
+    const pending = this.pendingLoad;
+    if (!pending || pending.generation !== this.loadGeneration || pending.index !== this.index) return;
+    if (this.video.currentSrc && this.video.currentSrc !== pending.source) return;
+    this.video.defaultPlaybackRate = Number(this.rateSelect.value) || 1;
+    this.video.playbackRate = this.video.defaultPlaybackRate;
+    const target = Math.min(pending.localTime, Math.max(0, this.video.duration - .05));
+    if (target > .05) this.video.currentTime = target;
+    else this.finishPendingLoad();
+  }
+
+  finishPendingLoad() {
+    const pending = this.pendingLoad;
+    if (!pending || pending.generation !== this.loadGeneration) return;
+    this.pendingLoad = null;
+    this.setState(this.video.paused ? 'ready' : 'playing');
+    if (pending.autoplay) this.attemptPlay(pending.generation);
+  }
+
+  updatePartDuration() {
+    const duration = Number(this.video?.duration);
+    if (!this.parts[this.index] || !Number.isFinite(duration) || duration <= 0) return;
+    if (Math.abs(Number(this.parts[this.index].duration || 0) - duration) > .001) {
+      this.parts[this.index].duration = duration;
+      this.recalculate();
+    }
+  }
+
+  async attemptPlay(generation = this.loadGeneration) {
+    if (this.destroyed || generation !== this.loadGeneration) return;
+    this.intendedPlaying = true;
+    try {
+      await this.video.play();
+    } catch (error) {
+      if (generation !== this.loadGeneration || error?.name === 'AbortError') return;
+      this.intendedPlaying = false;
+      if (error?.name !== 'NotAllowedError') this.showError('浏览器未能开始播放，请重试。');
+    }
+  }
+
+  togglePlay() {
+    this.root.focus({ preventScroll: true });
+    if (this.video.ended) {
+      this.seek(0);
+      this.attemptPlay();
+    } else if (this.video.paused) this.attemptPlay();
+    else {
+      this.intendedPlaying = false;
+      this.video.pause();
+    }
+  }
+
+  syncPlayButtons() {
+    const playing = !this.video.paused && !this.video.ended;
+    const icon = playing ? playerIcons.pause : playerIcons.play;
+    this.playButton.innerHTML = icon;
+    this.centerPlay.innerHTML = icon;
+    this.playButton.setAttribute('aria-label', playing ? '暂停' : '播放');
+    this.centerPlay.setAttribute('aria-label', playing ? '暂停' : '播放');
+  }
+
+  setState(state, status = '') {
+    if (this.destroyed) return;
+    this.root.dataset.playerState = state;
+    this.root.setAttribute('aria-busy', String(['loading', 'seeking', 'buffering'].includes(state)));
+    if (status) this.toast.setAttribute('data-status', status);
+    else this.toast.removeAttribute('data-status');
+  }
+
+  showToast(message, duration = 1200) {
+    clearTimeout(this.toastTimer);
+    this.toast.textContent = message;
+    this.toast.classList.add('visible');
+    this.toastTimer = setTimeout(() => this.toast.classList.remove('visible'), duration);
+  }
+
+  showError(message) {
+    this.setState('error');
+    this.errorPanel.querySelector('span').textContent = message;
+    this.errorPanel.hidden = false;
+    this.showControls();
+  }
+
+  handleMediaError() {
+    const messages = {
+      1: '视频读取被中止。',
+      2: '网络读取失败，请检查连接后重试。',
+      3: '浏览器无法解码这段视频。',
+      4: '当前视频格式不受浏览器支持。'
+    };
+    this.showError(messages[this.video.error?.code] || '录像加载失败，请重试。');
+  }
+
+  scheduleRecovery() {
+    clearTimeout(this.recoveryTimer);
+    if (!this.intendedPlaying || this.retryCount >= 2) return;
+    const generation = this.loadGeneration;
+    this.recoveryTimer = setTimeout(() => {
+      if (!this.destroyed && generation === this.loadGeneration && this.video.readyState < 3) this.retry(true);
+    }, 7000);
+  }
+
+  retry(automatic = false) {
+    clearTimeout(this.recoveryTimer);
+    if (automatic) this.retryCount += 1;
+    else this.retryCount = 0;
+    const localTime = Number(this.video.currentTime) || 0;
+    const autoplay = this.intendedPlaying || !this.video.paused;
+    this.errorPanel.hidden = true;
+    this.showToast(automatic ? '连接停滞，正在自动恢复…' : '正在重新连接…', 1800);
+    this.loadPart(this.index, localTime, autoplay);
+  }
+
+  setRate(rate, persist = false, notify = true) {
+    const safeRate = Math.min(3, Math.max(.5, Number(rate) || 1));
+    this.video.defaultPlaybackRate = safeRate;
+    this.video.playbackRate = safeRate;
+    this.rateSelect.value = String(safeRate);
+    if (persist) this.persistPreferences();
+    if (notify) this.showToast(`${safeRate}×`);
+  }
+
+  setVolume(volume) {
+    this.video.volume = Math.min(1, Math.max(0, volume));
+    this.video.muted = this.video.volume === 0;
+    this.persistPreferences();
+    this.syncVolume();
+  }
+
+  syncVolume() {
+    this.volumeSlider.value = String(this.video.volume);
+    const muted = this.video.muted || this.video.volume === 0;
+    this.muteButton.innerHTML = muted ? playerIcons.muted : playerIcons.volume;
+    this.muteButton.setAttribute('aria-label', muted ? '取消静音' : '静音');
+  }
+
+  restorePreferences() {
+    try {
+      const preferences = JSON.parse(localStorage.getItem('player-preferences') || '{}');
+      const volume = Number.isFinite(preferences.volume) ? preferences.volume : 1;
+      const rate = Number.isFinite(preferences.rate) ? preferences.rate : 1;
+      this.video.volume = Math.min(1, Math.max(0, volume));
+      this.video.muted = Boolean(preferences.muted);
+      this.setRate(rate, false, false);
+    } catch (_) {
+      this.setRate(1, false, false);
+    }
+    this.syncVolume();
+  }
+
+  persistPreferences() {
+    try {
+      localStorage.setItem('player-preferences', JSON.stringify({
+        volume: this.video.volume,
+        muted: this.video.muted,
+        rate: this.video.playbackRate
+      }));
+    } catch (_) {}
+  }
+
+  readSavedPosition() {
+    try {
+      const saved = Number(localStorage.getItem(this.sessionKey));
+      if (Number.isFinite(saved) && saved > 5 && saved < this.total - 5) return saved;
+    } catch (_) {}
+    return 0;
+  }
+
+  savePosition() {
+    if (!this.total || this.video.ended) return;
+    try { localStorage.setItem(this.sessionKey, String(this.globalCurrentTime())); } catch (_) {}
+  }
+
+  handleGestureClick(event) {
+    if (Date.now() < (this.suppressGestureClickUntil || 0)) return;
+    if (event.detail >= 2) {
+      clearTimeout(this.singleClickTimer);
+      const bounds = this.gestureLayer.getBoundingClientRect();
+      const ratio = (event.clientX - bounds.left) / bounds.width;
+      if (ratio < .38) this.seekBy(-10);
+      else if (ratio > .62) this.seekBy(10);
+      else this.toggleFullscreen();
+      return;
+    }
+    clearTimeout(this.singleClickTimer);
+    this.singleClickTimer = setTimeout(() => this.togglePlay(), 220);
+  }
+
+  handleLongPressStart(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+    const bounds = this.gestureLayer.getBoundingClientRect();
+    if ((event.clientX - bounds.left) / bounds.width < .55) return;
+    clearTimeout(this.longPressTimer);
+    this.longPressTimer = setTimeout(() => {
+      this.longPressRate = this.video.playbackRate;
+      this.video.playbackRate = Math.max(2, this.video.playbackRate);
+      this.root.classList.add('is-accelerating');
+      this.showToast(`${this.video.playbackRate}× 快速播放`, 3000);
+    }, 450);
+  }
+
+  handleLongPressEnd() {
+    clearTimeout(this.longPressTimer);
+    if (this.longPressRate == null) return;
+    this.video.playbackRate = this.longPressRate;
+    this.longPressRate = null;
+    this.root.classList.remove('is-accelerating');
+    this.suppressGestureClickUntil = Date.now() + 350;
+    this.showToast('恢复正常速度');
+  }
+
+  handleKeydown(event) {
+    if (this.destroyed || event.defaultPrevented) return;
+    const tag = event.target?.tagName;
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(tag) && event.target !== this.timeline) return;
+    const actions = {
+      ' ': () => this.togglePlay(),
+      k: () => this.togglePlay(),
+      ArrowLeft: () => this.seekBy(-10),
+      j: () => this.seekBy(-10),
+      ArrowRight: () => this.seekBy(10),
+      l: () => this.seekBy(10),
+      ArrowUp: () => this.setVolume(this.video.volume + .05),
+      ArrowDown: () => this.setVolume(this.video.volume - .05),
+      m: () => { this.video.muted = !this.video.muted; this.persistPreferences(); this.syncVolume(); },
+      f: () => this.toggleFullscreen(),
+      p: () => this.togglePictureInPicture()
+    };
+    const action = actions[event.key] || actions[event.key?.toLowerCase()];
+    if (!action) return;
+    event.preventDefault();
+    action();
+  }
+
+  async toggleFullscreen() {
+    try {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        if (document.exitFullscreen) await document.exitFullscreen();
+        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      } else if (this.root.requestFullscreen) await this.root.requestFullscreen();
+      else if (this.root.webkitRequestFullscreen) this.root.webkitRequestFullscreen();
+      else if (this.video.webkitEnterFullscreen) this.video.webkitEnterFullscreen();
+    } catch (_) {
+      this.showToast('浏览器未能切换全屏');
+    } finally {
+      this.syncFullscreen();
+    }
+  }
+
+  syncFullscreen() {
+    const fullscreen = document.fullscreenElement === this.root || document.webkitFullscreenElement === this.root;
+    this.fullscreenButton.innerHTML = fullscreen ? playerIcons.fullscreenExit : playerIcons.fullscreen;
+    this.fullscreenButton.setAttribute('aria-label', fullscreen ? '退出全屏' : '全屏');
+    this.root.classList.toggle('is-fullscreen', fullscreen);
+    this.showControls();
+  }
+
+  async togglePictureInPicture() {
+    if (!document.pictureInPictureEnabled || !this.video.requestPictureInPicture) return;
+    try {
+      if (document.pictureInPictureElement) await document.exitPictureInPicture();
+      else await this.video.requestPictureInPicture();
+    } catch (_) {
+      this.showToast('当前无法进入画中画');
+    }
+  }
+
+  showControls() {
+    clearTimeout(this.controlsTimer);
+    this.root.classList.add('show-controls');
+    if (!this.video.paused) this.scheduleControlsHide();
+  }
+
+  scheduleControlsHide() {
+    clearTimeout(this.controlsTimer);
+    if (this.video.paused || this.scrubbing) return;
+    this.controlsTimer = setTimeout(() => this.root.classList.remove('show-controls'), 2600);
+  }
+
+  setupMediaSession() {
+    if (!('mediaSession' in navigator)) return;
+    const handlers = {
+      play: () => this.attemptPlay(),
+      pause: () => { this.intendedPlaying = false; this.video.pause(); },
+      seekbackward: details => this.seekBy(-(details.seekOffset || 10)),
+      seekforward: details => this.seekBy(details.seekOffset || 10),
+      seekto: details => this.seek(details.seekTime)
+    };
+    for (const [action, handler] of Object.entries(handlers)) {
+      try { navigator.mediaSession.setActionHandler(action, handler); } catch (_) {}
+    }
   }
 
   destroy() {
     this.destroyed = true;
+    this.savePosition();
+    clearTimeout(this.toastTimer);
+    clearTimeout(this.recoveryTimer);
+    clearTimeout(this.controlsTimer);
+    clearTimeout(this.singleClickTimer);
+    clearTimeout(this.longPressTimer);
+    this.listeners.splice(0).forEach(remove => remove());
+    if ('mediaSession' in navigator) {
+      for (const action of ['play', 'pause', 'seekbackward', 'seekforward', 'seekto']) {
+        try { navigator.mediaSession.setActionHandler(action, null); } catch (_) {}
+      }
+    }
     if (this.video) { this.video.pause(); this.video.removeAttribute('src'); this.video.load(); }
     this.mount.innerHTML = '';
   }

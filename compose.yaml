@@ -15,6 +15,9 @@ services:
       - UPLOADER_SESSION_NAME=/app/session/uploader
       - WEB_SESSION_NAME=/app/session/web
       - MAX_STREAMS=4
+      - MEDIA_CACHE_DIR=/app/cache
+      - MEDIA_CACHE_MAX_MB=${MEDIA_CACHE_MAX_MB:-2048}
+      - MEDIA_CACHE_MAX_AGE=${MEDIA_CACHE_MAX_AGE:-86400}
       
       # [Optional] Custom Device Name
       # - DEVICE_MODEL=TG-Uploader
@@ -38,6 +41,7 @@ services:
       - ./downloads:/downloads
       - ./session:/app/session
       - ./archive:/archive
+      - ./cache:/app/cache
     ports:
       - "127.0.0.1:31527:31527"
     stop_grace_period: 2m

@@ -3,6 +3,8 @@ import logging
 import math
 import os
 import sqlite3
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -29,10 +31,17 @@ UPLOADER_SESSION_NAME = os.getenv("UPLOADER_SESSION_NAME", "/app/session/uploade
 WEB_SESSION_NAME = os.getenv("WEB_SESSION_NAME", "/app/session/web")
 MAX_STREAMS = max(1, min(int(os.getenv("MAX_STREAMS", "4")), 16))
 STATIC_DIR = Path(__file__).resolve().parent / "web"
+MEDIA_CACHE_DIR = Path(os.getenv("MEDIA_CACHE_DIR", "/tmp/tg-uploader-media-cache"))
+MEDIA_CACHE_MAX_BYTES = max(64, int(os.getenv("MEDIA_CACHE_MAX_MB", "1024"))) * 1024 * 1024
+MEDIA_CACHE_BLOCK_SIZE = 512 * 1024
+MEDIA_CACHE_MAX_AGE = max(60, int(os.getenv("MEDIA_CACHE_MAX_AGE", "86400")))
 
 telegram: TelegramClient | None = None
 stream_slots = asyncio.Semaphore(MAX_STREAMS)
 thumbnail_slots = asyncio.Semaphore(6)
+media_cache_locks: dict[tuple[int, int, int], asyncio.Lock] = {}
+media_cache_cleanup_lock = asyncio.Lock()
+last_media_cache_cleanup = 0.0
 
 
 def _session_path(name: str) -> Path:
@@ -113,7 +122,7 @@ def _video_details(message):
     height = 0
     for attribute in document.attributes:
         if isinstance(attribute, DocumentAttributeVideo):
-            duration = int(attribute.duration or 0)
+            duration = float(attribute.duration or 0)
             width = int(attribute.w or 0)
             height = int(attribute.h or 0)
             break
@@ -249,13 +258,144 @@ async def sessions(streamer: str = Query(min_length=1), date: str = Query(patter
     return result
 
 
-def _media_headers(details: dict, start: int, end: int, partial: bool) -> dict[str, str]:
+def _media_cache_path(message_id: int, file_size: int, block_index: int) -> Path:
+    return MEDIA_CACHE_DIR / f"{message_id}-{file_size}" / f"{block_index:08d}.block"
+
+
+def _read_cache_block(path: Path, expected_size: int) -> bytes | None:
+    try:
+        if path.stat().st_size != expected_size:
+            path.unlink(missing_ok=True)
+            return None
+        data = path.read_bytes()
+        os.utime(path, None)
+        return data
+    except OSError:
+        return None
+
+
+def _write_cache_block(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _cleanup_media_cache_sync() -> tuple[int, int]:
+    now = time.time()
+    entries: list[tuple[float, int, Path]] = []
+    total = 0
+    removed = 0
+    try:
+        MEDIA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        for path in MEDIA_CACHE_DIR.glob("*/*.block"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if now - stat.st_mtime > MEDIA_CACHE_MAX_AGE:
+                try:
+                    path.unlink()
+                    removed += stat.st_size
+                except OSError:
+                    pass
+                continue
+            total += stat.st_size
+            entries.append((stat.st_mtime, stat.st_size, path))
+        if total > MEDIA_CACHE_MAX_BYTES:
+            for _mtime, size, path in sorted(entries):
+                if total <= MEDIA_CACHE_MAX_BYTES:
+                    break
+                try:
+                    path.unlink()
+                    total -= size
+                    removed += size
+                except OSError:
+                    pass
+        for directory in MEDIA_CACHE_DIR.iterdir():
+            if directory.is_dir():
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+    except OSError as exc:
+        logger.warning("Media cache cleanup failed: %s", exc)
+    return total, removed
+
+
+async def _maybe_cleanup_media_cache() -> None:
+    global last_media_cache_cleanup
+    now = time.monotonic()
+    if now - last_media_cache_cleanup < 60 or media_cache_cleanup_lock.locked():
+        return
+    async with media_cache_cleanup_lock:
+        now = time.monotonic()
+        if now - last_media_cache_cleanup < 60:
+            return
+        last_media_cache_cleanup = now
+        total, removed = await asyncio.to_thread(_cleanup_media_cache_sync)
+        if removed:
+            logger.info("Media cache pruned %.1f MiB; %.1f MiB remain", removed / 1024**2, total / 1024**2)
+
+
+async def _media_block(message, details: dict, message_id: int, block_index: int) -> tuple[bytes, bool]:
+    block_start = block_index * MEDIA_CACHE_BLOCK_SIZE
+    expected_size = min(MEDIA_CACHE_BLOCK_SIZE, details["size"] - block_start)
+    path = _media_cache_path(message_id, details["size"], block_index)
+    cached = await asyncio.to_thread(_read_cache_block, path, expected_size)
+    if cached is not None:
+        return cached, True
+
+    key = (message_id, details["size"], block_index)
+    lock = media_cache_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        cached = await asyncio.to_thread(_read_cache_block, path, expected_size)
+        if cached is not None:
+            return cached, True
+
+        iterator = None
+        chunks = bytearray()
+        async with stream_slots:
+            try:
+                iterator = telegram.iter_download(
+                    message.document,
+                    offset=block_start,
+                    limit=math.ceil(expected_size / MEDIA_CACHE_BLOCK_SIZE),
+                    chunk_size=MEDIA_CACHE_BLOCK_SIZE,
+                    request_size=MEDIA_CACHE_BLOCK_SIZE,
+                    file_size=details["size"],
+                )
+                async for chunk in iterator:
+                    chunks.extend(bytes(chunk))
+                    if len(chunks) >= expected_size:
+                        break
+            finally:
+                if iterator is not None:
+                    await iterator.close()
+
+        data = bytes(chunks[:expected_size])
+        if len(data) != expected_size:
+            raise RuntimeError(
+                f"Telegram returned {len(data)} of {expected_size} bytes "
+                f"for message {message_id} block {block_index}"
+            )
+        await asyncio.to_thread(_write_cache_block, path, data)
+        await _maybe_cleanup_media_cache()
+        return data, False
+
+
+def _media_headers(message_id: int, details: dict, start: int, end: int, partial: bool) -> dict[str, str]:
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(end - start + 1),
         "Content-Type": details["mime_type"],
-        "Cache-Control": "private, no-store",
+        "Cache-Control": "private, max-age=3600",
         "Content-Encoding": "identity",
+        "ETag": f'"tg-{message_id}-{details["size"]}"',
+        "Vary": "Range",
         "X-Accel-Buffering": "no",
     }
     if partial:
@@ -279,11 +419,12 @@ async def _resolve_media(message_id: int, range_header: str | None):
 async def media_head(message_id: int):
     _message, details, byte_range = await _resolve_media(message_id, None)
     start, end, partial = byte_range
-    return Response(status_code=200, headers=_media_headers(details, start, end, partial))
+    return Response(status_code=200, headers=_media_headers(message_id, details, start, end, partial))
 
 
 @app.get("/api/media/{message_id}")
 async def media(message_id: int, request: Request):
+    started_at = time.monotonic()
     message, details, byte_range = await _resolve_media(message_id, request.headers.get("range"))
     if byte_range is None:
         return Response(
@@ -292,49 +433,40 @@ async def media(message_id: int, request: Request):
         )
     start, end, partial = byte_range
     remaining = end - start + 1
-    request_size = 4096
-    while request_size < remaining and request_size < 512 * 1024:
-        request_size *= 2
-    download_start = start - (start % request_size)
-    leading_bytes = start - download_start
-    download_length = leading_bytes + remaining
 
     async def body():
-        bytes_left = remaining
-        bytes_to_skip = leading_bytes
-        iterator = None
-        async with stream_slots:
-            try:
-                iterator = telegram.iter_download(
-                    message.document,
-                    offset=download_start,
-                    limit=math.ceil(download_length / request_size),
-                    chunk_size=request_size,
-                    request_size=request_size,
-                    file_size=details["size"],
-                )
-                async for chunk in iterator:
-                    if bytes_left <= 0:
-                        break
-                    data = bytes(chunk)
-                    if bytes_to_skip:
-                        if bytes_to_skip >= len(data):
-                            bytes_to_skip -= len(data)
-                            continue
-                        data = data[bytes_to_skip:]
-                        bytes_to_skip = 0
-                    data = data[:bytes_left]
-                    if not data:
-                        break
-                    bytes_left -= len(data)
-                    yield data
-            finally:
-                if iterator is not None:
-                    await iterator.close()
+        delivered = 0
+        cache_hits = 0
+        cache_misses = 0
+        first_block = start // MEDIA_CACHE_BLOCK_SIZE
+        last_block = end // MEDIA_CACHE_BLOCK_SIZE
+        try:
+            for block_index in range(first_block, last_block + 1):
+                data, cache_hit = await _media_block(message, details, message_id, block_index)
+                cache_hits += int(cache_hit)
+                cache_misses += int(not cache_hit)
+                block_start = block_index * MEDIA_CACHE_BLOCK_SIZE
+                slice_start = max(start, block_start) - block_start
+                slice_end = min(end + 1, block_start + len(data)) - block_start
+                selected = data[slice_start:slice_end]
+                if selected:
+                    delivered += len(selected)
+                    yield selected
+        finally:
+            logger.info(
+                "Media range message=%s bytes=%s-%s delivered=%s cache=%s/%s elapsed=%.3fs",
+                message_id,
+                start,
+                end,
+                delivered,
+                cache_hits,
+                cache_hits + cache_misses,
+                time.monotonic() - started_at,
+            )
 
     return StreamingResponse(
         body(),
         status_code=206 if partial else 200,
         media_type=details["mime_type"],
-        headers=_media_headers(details, start, end, partial),
+        headers=_media_headers(message_id, details, start, end, partial),
     )
