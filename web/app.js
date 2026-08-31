@@ -3,7 +3,10 @@ const themeButton = document.querySelector('#themeButton');
 const themeIcon = document.querySelector('#themeIcon');
 const themeLabel = document.querySelector('#themeLabel');
 const themeMenu = document.querySelector('#themeMenu');
+const siteSearch = document.querySelector('#siteSearch');
+const siteSearchInput = document.querySelector('#siteSearchInput');
 const deviceTheme = window.matchMedia('(prefers-color-scheme: dark)');
+const nameCollator = new Intl.Collator('zh-CN-u-co-pinyin', { numeric: true, sensitivity: 'base' });
 
 const themeNames = { auto: '跟随设备', light: '浅色', dark: '深色' };
 const themeIcons = {
@@ -21,12 +24,15 @@ const playerIcons = {
 let themeMode = localStorage.getItem('theme-mode') || 'auto';
 if (!themeNames[themeMode]) themeMode = themeMode === 'oled' ? 'dark' : 'auto';
 let activePlayer = null;
+let homeSort = 'recent';
+let homeQuery = '';
+let homeRenderer = null;
 
 function applyTheme() {
   const resolved = themeMode === 'auto' ? (deviceTheme.matches ? 'dark' : 'light') : themeMode;
   document.documentElement.dataset.theme = resolved;
   document.querySelector('meta[name="theme-color"]').content =
-    resolved === 'light' ? '#f5f5f3' : '#000000';
+    resolved === 'light' ? '#ffffff' : '#000000';
   themeIcon.innerHTML = themeIcons[themeMode];
   themeLabel.textContent = themeNames[themeMode];
   themeButton.setAttribute('aria-label', `主题：${themeNames[themeMode]}`);
@@ -66,26 +72,49 @@ document.addEventListener('keydown', event => {
 deviceTheme.addEventListener('change', () => { if (themeMode === 'auto') applyTheme(); });
 applyTheme();
 
+siteSearch.addEventListener('submit', event => {
+  event.preventDefault();
+  homeQuery = siteSearchInput.value.trim();
+  if (location.hash.replace(/^#\/?/, '').startsWith('streamer')) location.hash = '#/';
+  else homeRenderer?.();
+});
+siteSearchInput.addEventListener('input', () => {
+  homeQuery = siteSearchInput.value.trim();
+  homeRenderer?.();
+});
+document.querySelector('.brand').addEventListener('click', () => {
+  homeQuery = '';
+  siteSearchInput.value = '';
+});
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, char => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   })[char]);
 }
 
-function coverMarkup(messageId, className = '') {
-  const image = messageId
-    ? `<img data-cover src="/api/thumbnail/${Number(messageId)}" alt="" loading="lazy">`
-    : '';
-  return `<span class="cover-frame ${className}">
+function coverMarkup(messageId, className = '', badge = '') {
+  const url = messageId ? `/api/thumbnail/${Number(messageId)}` : '';
+  const image = url ? `<img data-cover src="${url}" alt="" loading="lazy">` : '';
+  const style = url ? ` style="--cover-image:url('${url}')"` : '';
+  return `<span class="cover-frame ${className}"${style}>
     ${image}
     <span class="cover-fallback" aria-hidden="true">
       <svg viewBox="0 0 24 24"><path d="m9 7 8 5-8 5V7Z"/></svg>
     </span>
+    ${badge ? `<span class="cover-badge">${escapeHtml(badge)}</span>` : ''}
   </span>`;
 }
 
-function bindCoverFallbacks(root = document) {
+function bindCovers(root = document) {
   root.querySelectorAll('img[data-cover]').forEach(image => {
+    const resolveShape = () => {
+      const frame = image.closest('.cover-frame');
+      frame?.classList.toggle('portrait-cover', image.naturalHeight > image.naturalWidth * 1.15);
+      frame?.classList.add('cover-ready');
+    };
+    if (image.complete && image.naturalWidth) resolveShape();
+    else image.addEventListener('load', resolveShape, { once: true });
     image.addEventListener('error', () => image.closest('.cover-frame')?.classList.add('cover-missing'), { once: true });
   });
 }
@@ -113,10 +142,22 @@ async function api(path, params = {}) {
   return response.json();
 }
 
-function formatDate(date) {
+function formatCardDate(date) {
   const parsed = new Date(`${date}T00:00:00`);
   if (Number.isNaN(parsed.getTime())) return date;
-  return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' }).format(parsed);
+  return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' }).format(parsed);
+}
+
+function formatRelativeDate(date) {
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return date;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((today - parsed) / 86400000);
+  if (days === 0) return '今天';
+  if (days === 1) return '昨天';
+  if (days > 1 && days < 7) return `${days} 天前`;
+  return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(parsed);
 }
 
 function formatDuration(seconds) {
@@ -132,51 +173,68 @@ function formatDuration(seconds) {
 async function renderHome() {
   loading('正在加载主播…');
   const streamers = await api('/api/streamers');
+  app.dataset.page = 'home';
   app.innerHTML = `
-    <section class="library-heading">
-      <div class="heading-copy">
-        <p class="eyebrow">LIBRARY</p>
+    <section class="content-heading">
+      <div>
         <h1>主播</h1>
-        <p class="page-subtitle">${streamers.length} 位主播的直播记录</p>
+        <p>${streamers.length} 位主播的直播归档</p>
       </div>
-      <label class="search-wrap">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-        <input id="streamerSearch" class="search-input" type="search" placeholder="搜索主播" autocomplete="off">
-      </label>
+      <div class="sort-switch" role="group" aria-label="主播排序方式">
+        <button type="button" data-sort="recent">最近更新</button>
+        <button type="button" data-sort="name">名称 A–Z</button>
+      </div>
     </section>
-    <section id="streamerGrid" class="media-grid" aria-label="主播列表"></section>`;
+    <section id="streamerGrid" class="video-grid" aria-label="主播列表"></section>`;
 
   const grid = document.querySelector('#streamerGrid');
-  const draw = items => {
-    grid.innerHTML = items.length ? items.map(item => `
-      <button class="streamer-card" type="button" data-name="${escapeHtml(item.name)}">
-        ${coverMarkup(item.cover_message_id, 'streamer-cover')}
-        <span class="card-copy">
-          <span class="card-title">${escapeHtml(item.name)}</span>
-          <span class="card-meta">${item.session_count} 场直播</span>
+  const draw = () => {
+    const query = homeQuery.toLocaleLowerCase();
+    const visible = streamers
+      .filter(item => item.name.toLocaleLowerCase().includes(query))
+      .sort((left, right) => homeSort === 'name'
+        ? nameCollator.compare(left.name, right.name)
+        : right.latest_date.localeCompare(left.latest_date) || right.cover_message_id - left.cover_message_id);
+    document.querySelectorAll('[data-sort]').forEach(button => {
+      const active = button.dataset.sort === homeSort;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    grid.innerHTML = visible.length ? visible.map(item => `
+      <button class="video-card streamer-card" type="button" data-name="${escapeHtml(item.name)}">
+        ${coverMarkup(item.cover_message_id, 'video-thumbnail', `${item.session_count} 场`)}
+        <span class="video-copy">
+          <span class="video-title">${escapeHtml(item.name)}</span>
+          <span class="video-meta">更新于 ${escapeHtml(formatRelativeDate(item.latest_date))} · ${item.part_count} 个录像</span>
         </span>
       </button>`).join('') : '<div class="empty-state compact"><p>没有找到匹配的主播</p></div>';
-    bindCoverFallbacks(grid);
+    bindCovers(grid);
     grid.querySelectorAll('.streamer-card').forEach(card => {
       card.addEventListener('click', () => { location.hash = `#/streamer/${encodeURIComponent(card.dataset.name)}`; });
     });
   };
-  draw(streamers);
-  document.querySelector('#streamerSearch').addEventListener('input', event => {
-    const query = event.target.value.trim().toLocaleLowerCase();
-    draw(streamers.filter(item => item.name.toLocaleLowerCase().includes(query)));
+  homeRenderer = draw;
+  document.querySelectorAll('[data-sort]').forEach(button => {
+    button.addEventListener('click', () => {
+      homeSort = button.dataset.sort;
+      draw();
+    });
   });
+  draw();
 }
 
 async function renderStreamer(streamer) {
   loading(`正在读取 ${streamer} 的直播日期…`);
   const dates = await api('/api/dates', { streamer });
+  app.dataset.page = 'channel';
   const groups = new Map();
   dates.forEach(item => {
     const month = item.date.slice(0, 7);
     if (!groups.has(month)) groups.set(month, []);
     groups.get(month).push(item);
   });
+  const latestCover = dates[0]?.cover_message_id;
+  const coverUrl = latestCover ? `/api/thumbnail/${Number(latestCover)}` : '';
   app.innerHTML = `
     <nav class="breadcrumb" aria-label="当前位置">
       <button type="button" data-back>
@@ -184,30 +242,35 @@ async function renderStreamer(streamer) {
         主播
       </button>
     </nav>
-    <section class="detail-heading">
-      <div class="heading-copy">
-        <h1>${escapeHtml(streamer)}</h1>
-        <p class="page-subtitle">${dates.reduce((sum, item) => sum + item.session_count, 0)} 场直播 · ${dates.length} 个日期</p>
+    <section class="channel-shell">
+      <div class="channel-banner"${coverUrl ? ` style="--cover-image:url('${coverUrl}')"` : ''}></div>
+      <div class="channel-profile">
+        ${coverMarkup(latestCover, 'channel-avatar')}
+        <div>
+          <h1>${escapeHtml(streamer)}</h1>
+          <p>${dates.reduce((sum, item) => sum + item.session_count, 0)} 场直播 · ${dates.length} 个直播日期</p>
+        </div>
       </div>
     </section>
+    <div class="channel-tabs"><span>直播归档</span></div>
     <div>${[...groups].map(([month, items]) => {
       const [year, monthNumber] = month.split('-');
       return `<section class="month-section">
-        <div class="month-heading"><h2>${Number(monthNumber)} 月</h2><span>${year}</span></div>
+        <div class="month-heading"><h2>${year} 年 ${Number(monthNumber)} 月</h2><span>${items.length} 个日期</span></div>
         <div class="date-grid">${items.map(item => {
           const parsedDate = new Date(`${item.date}T00:00:00`);
           const weekday = new Intl.DateTimeFormat('zh-CN', { weekday: 'short' }).format(parsedDate);
-          return `<button class="date-card" type="button" data-date="${item.date}">
-            ${coverMarkup(item.cover_message_id, 'date-cover')}
-            <span class="date-copy">
-              <span class="date-title">${Number(monthNumber)} 月 ${Number(item.date.slice(8, 10))} 日</span>
-              <span class="date-meta">${weekday} · ${item.session_count} 场直播</span>
+          return `<button class="video-card date-card" type="button" data-date="${item.date}">
+            ${coverMarkup(item.cover_message_id, 'video-thumbnail', `${item.session_count} 场`)}
+            <span class="video-copy">
+              <span class="video-title">${escapeHtml(formatCardDate(item.date))}</span>
+              <span class="video-meta">${weekday} · ${item.part_count} 个录像</span>
             </span>
           </button>`;
         }).join('')}</div>
       </section>`;
     }).join('')}</div>`;
-  bindCoverFallbacks(app);
+  bindCovers(app);
   document.querySelector('[data-back]').addEventListener('click', () => { location.hash = '#/'; });
   document.querySelectorAll('.date-card').forEach(card => {
     card.addEventListener('click', () => {
@@ -219,6 +282,7 @@ async function renderStreamer(streamer) {
 async function renderDate(streamer, date) {
   loading('正在读取当天录像…');
   const sessions = await api('/api/sessions', { streamer, date });
+  app.dataset.page = 'watch';
   app.innerHTML = `
     <nav class="breadcrumb" aria-label="当前位置">
       <button type="button" data-back>
@@ -226,19 +290,13 @@ async function renderDate(streamer, date) {
         ${escapeHtml(streamer)}
       </button>
     </nav>
-    <section class="detail-heading watch-heading">
-      <div class="heading-copy">
-        <h1>${escapeHtml(formatDate(date))}</h1>
-        <p class="page-subtitle">${escapeHtml(streamer)} · ${sessions.length} 场直播</p>
-      </div>
-    </section>
     ${sessions.length ? `<div class="watch-layout">
       <div class="watch-main">
         <div id="playerMount"></div>
         <div id="playerDescription" class="player-description"></div>
       </div>
       <aside class="session-panel">
-        <div class="session-panel-heading"><h2>当天录播</h2><span>${sessions.length}</span></div>
+        <div class="session-panel-heading"><div><h2>当天录播</h2><p>${escapeHtml(formatCardDate(date))}</p></div><span>${sessions.length} 场</span></div>
         <div id="sessionList" class="session-list" aria-label="当天直播列表"></div>
       </aside>
     </div>` : '<section class="empty-state"><p>当天没有可用录像</p></section>'}`;
@@ -250,13 +308,13 @@ async function renderDate(streamer, date) {
   const list = document.querySelector('#sessionList');
   list.innerHTML = sessions.map((session, index) => `
     <button class="session-card" type="button" data-session="${index}">
-      ${coverMarkup(session.parts[0]?.message_id, 'session-cover')}
+      ${coverMarkup(session.parts[0]?.message_id, 'session-cover', session.total_duration ? formatDuration(session.total_duration) : '')}
       <span class="session-copy">
-        <span class="session-time">${escapeHtml(session.time.slice(0, 5))}</span>
-        <span class="session-meta">${escapeHtml(session.platform)} · ${session.part_count} 段 · ${formatDuration(session.total_duration)}</span>
+        <span class="session-time">${escapeHtml(session.time.slice(0, 5))} 开播</span>
+        <span class="session-meta">${escapeHtml(session.platform)} · ${session.part_count} 个分片</span>
       </span>
     </button>`).join('');
-  bindCoverFallbacks(list);
+  bindCovers(list);
 
   const selectSession = index => {
     if (activePlayer) activePlayer.destroy();
@@ -264,7 +322,8 @@ async function renderDate(streamer, date) {
     const session = sessions[index];
     activePlayer = new MergedPlayer(document.querySelector('#playerMount'), session);
     document.querySelector('#playerDescription').innerHTML = `
-      <div><h2>${escapeHtml(session.time.slice(0, 5))} 开播</h2><p>${escapeHtml(session.platform)} · ${session.part_count} 个分片连续播放</p></div>`;
+      <h1>${escapeHtml(streamer)} · ${escapeHtml(formatCardDate(date))} ${escapeHtml(session.time.slice(0, 5))} 直播回放</h1>
+      <p>${escapeHtml(session.platform)} · ${session.part_count} 个分片连续播放 · 原始视频由 Telegram 提供</p>`;
   };
   list.querySelectorAll('.session-card').forEach(card => card.addEventListener('click', () => selectSession(Number(card.dataset.session))));
   selectSession(0);
@@ -389,6 +448,7 @@ class MergedPlayer {
 
 async function route() {
   if (activePlayer) { activePlayer.destroy(); activePlayer = null; }
+  homeRenderer = null;
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   try {
     if (parts[0] !== 'streamer') await renderHome();
