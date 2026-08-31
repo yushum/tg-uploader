@@ -37,5 +37,6 @@ COPY --from=builder /app/requirements.txt .
 RUN pip install --no-cache /wheels/*
 
 COPY *.py .
+COPY web ./web
 
 CMD ["python", "uploader.py"]

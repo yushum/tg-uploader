@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f4f6fa">
+  <title>直播档案</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="#/" aria-label="返回主播列表">
+      <span class="brand-mark">播</span>
+      <span>直播档案</span>
+    </a>
+    <button id="themeButton" class="quiet-button theme-button" type="button" aria-label="切换主题">
+      <span id="themeIcon" aria-hidden="true">◐</span>
+      <span id="themeLabel">自动</span>
+    </button>
+  </header>
+
+  <main id="app" class="app-shell" aria-live="polite">
+    <div class="loading-state">
+      <span class="spinner"></span>
+      <p>正在整理直播档案…</p>
+    </div>
+  </main>
+
+  <template id="errorTemplate">
+    <section class="empty-state">
+      <div class="empty-icon">!</div>
+      <h1>暂时无法加载</h1>
+      <p></p>
+      <button class="primary-button" type="button">重试</button>
+    </section>
+  </template>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

@@ -90,3 +90,12 @@ docker compose up -d
 
 * **查看日志**：`docker logs -f tg_uploader`
 * **防重防漏**：系统利用超轻量级的 SQLite 数据库 (`./session/uploader.db`) 记录已经传过的文件路径与状态，绝不会重复上传同一文件。数据库完全免维护。
+
+## 🌐 录播网站
+
+`docker compose up -d` 会同时启动录播网站，并仅监听宿主机的 `127.0.0.1:31527`，可直接接入 Cloudflare Tunnel。网站从现有数据库按主播和日期整理录像，通过 Telegram 分段读取视频，不会把视频缓存到本机。多个录像分片会在同一个播放器中连续播放。
+
+首次启动时，网站会从现有 `uploader.session` 创建独立的 `web.session`，避免影响上传进程。页面默认按北京时间自动切换日间、夜间和 OLED 主题，也可在右上角手动选择。
+
+* **网站日志**：`docker logs -f tg_uploader_web`
+* **健康检查**：`curl http://127.0.0.1:31527/healthz`

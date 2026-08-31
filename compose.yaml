@@ -36,3 +36,23 @@ services:
       - ./session:/app/session
       - ./archive:/archive
     stop_grace_period: 2m
+
+  tg-uploader-web:
+    image: yushum/tg-uploader:latest
+    container_name: tg_uploader_web
+    restart: always
+    env_file: .env
+    command: ["uvicorn", "web_app:app", "--host", "0.0.0.0", "--port", "31527"]
+    environment:
+      - TZ=Asia/Shanghai
+      - API_ID=${API_ID}
+      - API_HASH=${API_HASH}
+      - CHANNEL_ID=${CHANNEL_ID}
+      - DB_PATH=/app/session/uploader.db
+      - UPLOADER_SESSION_NAME=/app/session/uploader
+      - WEB_SESSION_NAME=/app/session/web
+      - MAX_STREAMS=4
+    volumes:
+      - ./session:/app/session
+    ports:
+      - "127.0.0.1:31527:31527"
