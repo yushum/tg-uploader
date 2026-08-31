@@ -142,7 +142,8 @@ function showError(error) {
 }
 
 function coverMarkup(id, loading = 'lazy') {
-  return id ? `<img src="${thumb(id)}" alt="" loading="${loading}">` : '';
+  const priority = loading === 'eager' ? 'high' : 'low';
+  return id ? `<img src="${thumb(id)}" alt="" loading="${loading}" decoding="async" fetchpriority="${priority}">` : '';
 }
 
 function favoriteCardMarkup(item) {
@@ -248,7 +249,7 @@ async function renderChannel(channel, routeId) {
     ${dates.length ? `<nav class="month-rail" aria-label="选择月份">${[...grouped].map(([month], index) => `<button type="button" class="${index ? '' : 'active'}" data-jump-month="${month}">${month.replace('-', ' 年 ')} 月</button>`).join('')}</nav>
       <div class="date-sections">${[...grouped].map(([month, items]) => { const [year, monthNumber] = month.split('-'); return `<section class="month-section" data-month-section="${month}">
         <div class="month-heading"><div><span class="section-kicker">${new Intl.DateTimeFormat('en', { month: 'long' }).format(new Date(`${month}-01T00:00:00`))}</span><h2>${year} 年 ${Number(monthNumber)} 月</h2></div><span>${items.length} 个录像日</span></div>
-        <div class="date-grid">${items.map(item => { const date = new Date(`${item.date}T00:00:00`); return `<a class="date-card" href="${watchPath(channel, item.date)}" data-link><span class="date-day">${date.getDate()}</span><span class="date-copy"><strong>${new Intl.DateTimeFormat('zh-CN', { weekday: 'long' }).format(date)}</strong><small>${item.session_count} 场 · ${item.part_count} 个录像片段</small></span><i>›</i></a>`; }).join('')}</div>
+        <div class="date-grid">${items.map(item => { const date = new Date(`${item.date}T00:00:00`); return `<a class="date-card" href="${watchPath(channel, item.date)}" data-link><span class="date-cover">${coverMarkup(item.cover_message_id)}<i aria-hidden="true">▶</i></span><span class="date-day">${date.getDate()}</span><span class="date-copy"><strong>${new Intl.DateTimeFormat('zh-CN', { weekday: 'long' }).format(date)}</strong><small>${item.session_count} 场 · ${item.part_count} 个录像片段</small></span><i>›</i></a>`; }).join('')}</div>
       </section>`; }).join('')}</div>` : '<div class="no-results">这个主播还没有录像</div>'}
   </section>`;
   if (state.transitionChannel === channel) document.querySelector('.channel-avatar img')?.style.setProperty('view-transition-name', 'channel-cover');
