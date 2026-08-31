@@ -15,7 +15,7 @@
         : (savedTheme === 'dark' || savedTheme === 'oled' || matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     } catch (_) {}
   </script>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v=20260901-clean-routes">
 </head>
 <body>
   <header class="site-header">
@@ -89,6 +89,6 @@
     </section>
   </template>
 
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=20260901-clean-routes" defer></script>
 </body>
 </html>

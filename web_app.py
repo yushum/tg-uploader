@@ -146,12 +146,12 @@ async def _get_message(message_id: int):
 
 @app.get("/", include_in_schema=False)
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/streamer/{path:path}", include_in_schema=False)
 async def streamer_page(path: str):
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/healthz", include_in_schema=False)
