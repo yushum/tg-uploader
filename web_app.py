@@ -149,6 +149,11 @@ async def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/streamer/{path:path}", include_in_schema=False)
+async def streamer_page(path: str):
+    return FileResponse(STATIC_DIR / "index.html")
+
+
 @app.get("/healthz", include_in_schema=False)
 async def healthz():
     return {"ok": True, "telegram": bool(telegram and telegram.is_connected())}

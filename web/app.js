@@ -33,6 +33,23 @@ let homeSort = 'recent';
 let homeQuery = '';
 let homeRenderer = null;
 
+function isStreamerRoute() {
+  return location.pathname.split('/').filter(Boolean)[0] === 'streamer';
+}
+
+function navigate(path, { replace = false } = {}) {
+  const target = path.startsWith('/') ? path : `/${path}`;
+  if (replace) history.replaceState(null, '', target);
+  else history.pushState(null, '', target);
+  route();
+}
+
+function migrateLegacyHashRoute() {
+  const match = location.hash.match(/^#(\/.*)$/);
+  if (!match) return;
+  history.replaceState(null, '', `${match[1]}${location.search}`);
+}
+
 function updateNavigation(page) {
   sideNav.classList.toggle('is-hidden', page === 'watch');
   document.querySelector('[data-nav-home]').classList.toggle('active', page === 'home');
@@ -100,7 +117,7 @@ siteSearch.addEventListener('submit', event => {
   homeQuery = siteSearchInput.value.trim();
   siteSearch.classList.remove('expanded');
   document.querySelector('.header-inner').classList.remove('searching');
-  if (location.hash.replace(/^#\/?/, '').startsWith('streamer')) location.hash = '#/';
+  if (isStreamerRoute()) navigate('/');
   else homeRenderer?.();
 });
 siteSearchInput.addEventListener('input', () => {
@@ -116,12 +133,19 @@ document.querySelector('.brand').addEventListener('click', () => {
 document.querySelectorAll('[data-nav-sort]').forEach(button => {
   button.addEventListener('click', () => {
     homeSort = button.dataset.navSort;
-    if (location.hash.replace(/^#\/?/, '').startsWith('streamer')) location.hash = '#/';
+    if (isStreamerRoute()) navigate('/');
     else {
       updateNavigation('home');
       homeRenderer?.();
     }
   });
+});
+document.addEventListener('click', event => {
+  const link = event.target.closest('a[data-spa-link]');
+  if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (link.origin !== location.origin) return;
+  event.preventDefault();
+  navigate(`${link.pathname}${link.search}`);
 });
 
 function escapeHtml(value) {
@@ -253,7 +277,7 @@ async function renderHome() {
       </button>`).join('') : '<div class="empty-state compact"><p>没有找到匹配的主播</p></div>';
     bindCovers(grid);
     grid.querySelectorAll('.streamer-card').forEach(card => {
-      card.addEventListener('click', () => { location.hash = `#/streamer/${encodeURIComponent(card.dataset.name)}`; });
+      card.addEventListener('click', () => navigate(`/streamer/${encodeURIComponent(card.dataset.name)}`));
     });
   };
   homeRenderer = draw;
@@ -319,7 +343,7 @@ async function renderStreamer(streamer) {
       </section>`;
     }).join('')}</div>`;
   bindCovers(app);
-  document.querySelector('[data-back]').addEventListener('click', () => { location.hash = '#/'; });
+  document.querySelector('[data-back]').addEventListener('click', () => navigate('/'));
   document.querySelectorAll('[data-month]').forEach(button => {
     button.addEventListener('click', () => {
       document.querySelector(`[data-month-section="${button.dataset.month}"]`)
@@ -328,7 +352,7 @@ async function renderStreamer(streamer) {
   });
   document.querySelectorAll('.date-card').forEach(card => {
     card.addEventListener('click', () => {
-      location.hash = `#/streamer/${encodeURIComponent(streamer)}/${card.dataset.date}`;
+      navigate(`/streamer/${encodeURIComponent(streamer)}/${card.dataset.date}`);
     });
   });
 }
@@ -356,7 +380,7 @@ async function renderDate(streamer, date) {
       </aside>
     </div>` : '<section class="empty-state"><p>当天没有可用录像</p></section>'}`;
   document.querySelector('[data-back]').addEventListener('click', () => {
-    location.hash = `#/streamer/${encodeURIComponent(streamer)}`;
+    navigate(`/streamer/${encodeURIComponent(streamer)}`);
   });
   if (!sessions.length) return;
 
@@ -988,8 +1012,8 @@ class MergedPlayer {
 async function route() {
   if (activePlayer) { activePlayer.destroy(); activePlayer = null; }
   homeRenderer = null;
-  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   try {
+    const parts = location.pathname.split('/').filter(Boolean).map(decodeURIComponent);
     if (parts[0] !== 'streamer') await renderHome();
     else if (!parts[2]) await renderStreamer(parts[1]);
     else await renderDate(parts[1], parts[2]);
@@ -999,5 +1023,6 @@ async function route() {
   }
 }
 
-window.addEventListener('hashchange', route);
+migrateLegacyHashRoute();
+window.addEventListener('popstate', route);
 route();
