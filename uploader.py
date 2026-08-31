@@ -9,7 +9,9 @@ import math
 import shutil
 import uuid
 import time
+import contextlib
 from pathlib import Path
+import uvicorn
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 from telethon.tl.types import DocumentAttributeVideo
@@ -1006,8 +1008,13 @@ async def scan_and_upload(client: TelegramClient, conn: sqlite3.Connection):
             await asyncio.sleep(10)  # 雷达每 10 秒扫一次
 
 # ---------------- 主干程序 ----------------
+class EmbeddedWebServer(uvicorn.Server):
+    def capture_signals(self):
+        return contextlib.nullcontext()
+
+
 async def main():
-    global MAX_SPLIT_SIZE_MB
+    global MAX_SPLIT_SIZE_MB, is_running
     logger.info("Initializing SQLite database...")
     conn = init_db()
 
@@ -1075,12 +1082,25 @@ async def main():
     except Exception as e:
         logger.warning(f"Could not retrieve user profile to check Premium status: {e}")
     
+    # 上传与网站共用一个进程和事件循环，但使用各自的 Telegram 会话。
+    from web_app import app as web_app
+
+    web_server = EmbeddedWebServer(
+        uvicorn.Config(web_app, host="0.0.0.0", port=31527, access_log=False)
+    )
+    web_task = asyncio.create_task(web_server.serve())
+
     # 将扫描任务投入事件循环
     upload_task = asyncio.create_task(scan_and_upload(client, conn))
     
     # 阻塞主线程，直到收到终止信号
-    while is_running:
+    while is_running and not web_task.done():
         await asyncio.sleep(1)
+
+    if web_task.done() and is_running:
+        is_running = False
+        error = web_task.exception()
+        logger.error(f"Web server stopped unexpectedly: {error or 'unknown reason'}")
         
     logger.info("Termination signal received. Waiting for active upload slice to flush safely...")
     
@@ -1090,6 +1110,12 @@ async def main():
         await upload_task
     except asyncio.CancelledError:
         pass
+
+    logger.info("Stopping embedded web server...")
+    web_server.should_exit = True
+    web_result = await asyncio.gather(web_task, return_exceptions=True)
+    if isinstance(web_result[0], Exception):
+        logger.error(f"Web server shutdown failed: {web_result[0]}")
         
     logger.info("Disconnecting Telegram Client gracefully...")
     await client.disconnect()

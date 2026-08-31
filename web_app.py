@@ -32,6 +32,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "web"
 
 telegram: TelegramClient | None = None
 stream_slots = asyncio.Semaphore(MAX_STREAMS)
+thumbnail_slots = asyncio.Semaphore(6)
 
 
 def _session_path(name: str) -> Path:
@@ -148,14 +149,27 @@ async def healthz():
 async def streamers():
     sessions = group_sessions(_catalog())
     grouped: dict[str, dict] = {}
-    for (streamer, _platform, date, _time), parts in sessions.items():
+    for (streamer, _platform, date, time), parts in sessions.items():
+        marker = (date, time)
         item = grouped.setdefault(
             streamer,
-            {"name": streamer, "session_count": 0, "part_count": 0, "latest_date": date},
+            {
+                "name": streamer,
+                "session_count": 0,
+                "part_count": 0,
+                "latest_date": date,
+                "cover_message_id": parts[0].message_id,
+                "_cover_marker": marker,
+            },
         )
         item["session_count"] += 1
         item["part_count"] += len(parts)
-        item["latest_date"] = max(item["latest_date"], date)
+        if marker > item["_cover_marker"]:
+            item["latest_date"] = date
+            item["cover_message_id"] = parts[0].message_id
+            item["_cover_marker"] = marker
+    for item in grouped.values():
+        item.pop("_cover_marker")
     return sorted(grouped.values(), key=lambda item: item["name"].casefold())
 
 
@@ -163,11 +177,39 @@ async def streamers():
 async def dates(streamer: str = Query(min_length=1)):
     sessions = group_sessions([part for part in _catalog() if part.streamer == streamer])
     grouped: dict[str, dict] = {}
-    for (_streamer, _platform, date, _time), parts in sessions.items():
-        item = grouped.setdefault(date, {"date": date, "session_count": 0, "part_count": 0})
+    for (_streamer, _platform, date, time), parts in sessions.items():
+        item = grouped.setdefault(
+            date,
+            {
+                "date": date,
+                "session_count": 0,
+                "part_count": 0,
+                "cover_message_id": parts[0].message_id,
+                "_cover_time": time,
+            },
+        )
         item["session_count"] += 1
         item["part_count"] += len(parts)
+        if time > item["_cover_time"]:
+            item["cover_message_id"] = parts[0].message_id
+            item["_cover_time"] = time
+    for item in grouped.values():
+        item.pop("_cover_time")
     return sorted(grouped.values(), key=lambda item: item["date"], reverse=True)
+
+
+@app.get("/api/thumbnail/{message_id}")
+async def thumbnail(message_id: int):
+    message = await _get_message(message_id)
+    async with thumbnail_slots:
+        content = await telegram.download_media(message, file=bytes, thumb=-1)
+    if not content:
+        raise HTTPException(status_code=404, detail="录像没有缩略图")
+    return Response(
+        content=content,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=604800, immutable"},
+    )
 
 
 @app.get("/api/sessions")
@@ -250,17 +292,23 @@ async def media(message_id: int, request: Request):
         )
     start, end, partial = byte_range
     remaining = end - start + 1
-    request_size = 4096 if remaining <= 4096 else 512 * 1024
+    request_size = 4096
+    while request_size < remaining and request_size < 512 * 1024:
+        request_size *= 2
+    download_start = start - (start % request_size)
+    leading_bytes = start - download_start
+    download_length = leading_bytes + remaining
 
     async def body():
         bytes_left = remaining
+        bytes_to_skip = leading_bytes
         iterator = None
         async with stream_slots:
             try:
                 iterator = telegram.iter_download(
                     message.document,
-                    offset=start,
-                    limit=math.ceil(remaining / request_size),
+                    offset=download_start,
+                    limit=math.ceil(download_length / request_size),
                     chunk_size=request_size,
                     request_size=request_size,
                     file_size=details["size"],
@@ -268,7 +316,14 @@ async def media(message_id: int, request: Request):
                 async for chunk in iterator:
                     if bytes_left <= 0:
                         break
-                    data = bytes(chunk[:bytes_left])
+                    data = bytes(chunk)
+                    if bytes_to_skip:
+                        if bytes_to_skip >= len(data):
+                            bytes_to_skip -= len(data)
+                            continue
+                        data = data[bytes_to_skip:]
+                        bytes_to_skip = 0
+                    data = data[:bytes_left]
                     if not data:
                         break
                     bytes_left -= len(data)

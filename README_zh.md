@@ -93,9 +93,9 @@ docker compose up -d
 
 ## 🌐 录播网站
 
-`docker compose up -d` 会同时启动录播网站，并仅监听宿主机的 `127.0.0.1:31527`，可直接接入 Cloudflare Tunnel。网站从现有数据库按主播和日期整理录像，通过 Telegram 分段读取视频，不会把视频缓存到本机。多个录像分片会在同一个播放器中连续播放。
+`docker compose up -d` 会在上传器容器内同时启动录播网站，并仅监听宿主机的 `127.0.0.1:31527`，可直接接入 Cloudflare Tunnel。网站从现有数据库按主播和日期整理录像，通过 Telegram 分段读取视频，不会把视频缓存到本机。多个录像分片会在同一个播放器中连续播放。
 
-首次启动时，网站会从现有 `uploader.session` 创建独立的 `web.session`，避免影响上传进程。页面默认按北京时间自动切换日间、夜间和 OLED 主题，也可在右上角手动选择。
+首次启动时，网站会从现有 `uploader.session` 创建独立的 `web.session`，避免播放影响上传连接。页面默认跟随设备的浅色或深色外观，也可在右上角手动选择；深色主题使用纯黑背景。
 
-* **网站日志**：`docker logs -f tg_uploader_web`
+* **网站与上传日志**：`docker logs -f tg_uploader`
 * **健康检查**：`curl http://127.0.0.1:31527/healthz`

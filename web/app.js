@@ -2,37 +2,69 @@ const app = document.querySelector('#app');
 const themeButton = document.querySelector('#themeButton');
 const themeIcon = document.querySelector('#themeIcon');
 const themeLabel = document.querySelector('#themeLabel');
+const themeMenu = document.querySelector('#themeMenu');
+const deviceTheme = window.matchMedia('(prefers-color-scheme: dark)');
 
-const themeModes = ['auto', 'light', 'dark', 'oled'];
-const themeNames = { auto: '自动', light: '日间', dark: '夜间', oled: 'OLED' };
-const themeIcons = { auto: '◐', light: '☀', dark: '☾', oled: '●' };
+const themeNames = { auto: '跟随设备', light: '浅色', dark: '深色' };
+const themeIcons = {
+  auto: '<path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 13.5v-7ZM9 20h6M12 16v4"/>',
+  light: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/>',
+  dark: '<path d="M20.3 15.4A9 9 0 0 1 8.6 3.7 9 9 0 1 0 20.3 15.4Z"/>'
+};
+const playerIcons = {
+  play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5V7Z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7v10M15 7v10"/></svg>',
+  volume: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6 7 10H4v4h3l4 4V6ZM15 9a4 4 0 0 1 0 6M17.5 6.5a8 8 0 0 1 0 11"/></svg>',
+  muted: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6 7 10H4v4h3l4 4V6ZM16 10l4 4M20 10l-4 4"/></svg>',
+  fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>'
+};
 let themeMode = localStorage.getItem('theme-mode') || 'auto';
+if (!themeNames[themeMode]) themeMode = themeMode === 'oled' ? 'dark' : 'auto';
 let activePlayer = null;
 
-function automaticTheme() {
-  const hour = new Date().getHours();
-  if (hour >= 7 && hour < 18) return 'light';
-  if (hour >= 18 && hour < 23) return 'dark';
-  return 'oled';
-}
-
 function applyTheme() {
-  const resolved = themeMode === 'auto' ? automaticTheme() : themeMode;
+  const resolved = themeMode === 'auto' ? (deviceTheme.matches ? 'dark' : 'light') : themeMode;
   document.documentElement.dataset.theme = resolved;
   document.querySelector('meta[name="theme-color"]').content =
-    resolved === 'light' ? '#f4f6fa' : resolved === 'dark' ? '#11141b' : '#000000';
-  themeIcon.textContent = themeIcons[themeMode];
+    resolved === 'light' ? '#f5f5f3' : '#000000';
+  themeIcon.innerHTML = themeIcons[themeMode];
   themeLabel.textContent = themeNames[themeMode];
-  themeButton.title = `当前：${themeNames[themeMode]}，点击切换`;
+  themeButton.setAttribute('aria-label', `主题：${themeNames[themeMode]}`);
+  themeMenu.querySelectorAll('[data-theme-choice]').forEach(item => {
+    const selected = item.dataset.themeChoice === themeMode;
+    item.setAttribute('aria-checked', String(selected));
+    item.classList.toggle('selected', selected);
+  });
 }
 
 themeButton.addEventListener('click', () => {
-  themeMode = themeModes[(themeModes.indexOf(themeMode) + 1) % themeModes.length];
+  const opening = themeMenu.hidden;
+  themeMenu.hidden = !opening;
+  themeButton.setAttribute('aria-expanded', String(opening));
+});
+themeMenu.addEventListener('click', event => {
+  const item = event.target.closest('[data-theme-choice]');
+  if (!item) return;
+  themeMode = item.dataset.themeChoice;
   localStorage.setItem('theme-mode', themeMode);
+  themeMenu.hidden = true;
+  themeButton.setAttribute('aria-expanded', 'false');
   applyTheme();
 });
+document.addEventListener('click', event => {
+  if (!event.target.closest('.theme-picker')) {
+    themeMenu.hidden = true;
+    themeButton.setAttribute('aria-expanded', 'false');
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    themeMenu.hidden = true;
+    themeButton.setAttribute('aria-expanded', 'false');
+  }
+});
+deviceTheme.addEventListener('change', () => { if (themeMode === 'auto') applyTheme(); });
 applyTheme();
-setInterval(() => { if (themeMode === 'auto') applyTheme(); }, 60_000);
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, char => ({
@@ -40,14 +72,22 @@ function escapeHtml(value) {
   })[char]);
 }
 
-function hueFor(value) {
-  let hash = 0;
-  for (const char of value) hash = ((hash << 5) - hash + char.codePointAt(0)) | 0;
-  return Math.abs(hash) % 300;
+function coverMarkup(messageId, className = '') {
+  const image = messageId
+    ? `<img data-cover src="/api/thumbnail/${Number(messageId)}" alt="" loading="lazy">`
+    : '';
+  return `<span class="cover-frame ${className}">
+    ${image}
+    <span class="cover-fallback" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="m9 7 8 5-8 5V7Z"/></svg>
+    </span>
+  </span>`;
 }
 
-function initials(name) {
-  return [...name.trim()].slice(0, 2).join('').toUpperCase();
+function bindCoverFallbacks(root = document) {
+  root.querySelectorAll('img[data-cover]').forEach(image => {
+    image.addEventListener('error', () => image.closest('.cover-frame')?.classList.add('cover-missing'), { once: true });
+  });
 }
 
 function loading(label = '正在加载…') {
@@ -90,32 +130,33 @@ function formatDuration(seconds) {
 }
 
 async function renderHome() {
-  loading('正在整理主播列表…');
+  loading('正在加载主播…');
   const streamers = await api('/api/streamers');
   app.innerHTML = `
-    <section class="page-heading">
+    <section class="library-heading">
       <div class="heading-copy">
-        <p class="eyebrow">Archive</p>
-        <h1>所有主播</h1>
-        <p class="page-subtitle">${streamers.length} 位主播，选择一位查看完整直播记录</p>
+        <p class="eyebrow">LIBRARY</p>
+        <h1>主播</h1>
+        <p class="page-subtitle">${streamers.length} 位主播的直播记录</p>
       </div>
       <label class="search-wrap">
-        <input id="streamerSearch" class="search-input" type="search" placeholder="搜索主播" autocomplete="off" aria-label="搜索主播">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+        <input id="streamerSearch" class="search-input" type="search" placeholder="搜索主播" autocomplete="off">
       </label>
     </section>
-    <section id="streamerGrid" class="streamer-grid"></section>`;
+    <section id="streamerGrid" class="media-grid" aria-label="主播列表"></section>`;
 
   const grid = document.querySelector('#streamerGrid');
   const draw = items => {
     grid.innerHTML = items.length ? items.map(item => `
       <button class="streamer-card" type="button" data-name="${escapeHtml(item.name)}">
-        <span class="avatar" style="--hue:${hueFor(item.name)}">${escapeHtml(initials(item.name))}</span>
+        ${coverMarkup(item.cover_message_id, 'streamer-cover')}
         <span class="card-copy">
           <span class="card-title">${escapeHtml(item.name)}</span>
-          <span class="card-meta">${item.session_count} 场 · 更新至 ${escapeHtml(item.latest_date)}</span>
+          <span class="card-meta">${item.session_count} 场直播</span>
         </span>
-        <span class="card-arrow" aria-hidden="true">›</span>
-      </button>`).join('') : '<div class="empty-state"><p>没有找到匹配的主播</p></div>';
+      </button>`).join('') : '<div class="empty-state compact"><p>没有找到匹配的主播</p></div>';
+    bindCoverFallbacks(grid);
     grid.querySelectorAll('.streamer-card').forEach(card => {
       card.addEventListener('click', () => { location.hash = `#/streamer/${encodeURIComponent(card.dataset.name)}`; });
     });
@@ -137,29 +178,36 @@ async function renderStreamer(streamer) {
     groups.get(month).push(item);
   });
   app.innerHTML = `
-    <button class="back-button" type="button" data-back>← 所有主播</button>
-    <section class="page-heading">
+    <nav class="breadcrumb" aria-label="当前位置">
+      <button type="button" data-back>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+        主播
+      </button>
+    </nav>
+    <section class="detail-heading">
       <div class="heading-copy">
-        <p class="eyebrow">Streamer</p>
         <h1>${escapeHtml(streamer)}</h1>
-        <p class="page-subtitle">共 ${dates.reduce((sum, item) => sum + item.session_count, 0)} 场直播，按开播日期归档</p>
+        <p class="page-subtitle">${dates.reduce((sum, item) => sum + item.session_count, 0)} 场直播 · ${dates.length} 个日期</p>
       </div>
     </section>
     <div>${[...groups].map(([month, items]) => {
       const [year, monthNumber] = month.split('-');
       return `<section class="month-section">
-        <h2 class="month-title">${year} 年 ${Number(monthNumber)} 月</h2>
+        <div class="month-heading"><h2>${Number(monthNumber)} 月</h2><span>${year}</span></div>
         <div class="date-grid">${items.map(item => {
-          const date = new Date(`${item.date}T00:00:00`);
-          const weekday = new Intl.DateTimeFormat('zh-CN', { weekday: 'short' }).format(date);
+          const parsedDate = new Date(`${item.date}T00:00:00`);
+          const weekday = new Intl.DateTimeFormat('zh-CN', { weekday: 'short' }).format(parsedDate);
           return `<button class="date-card" type="button" data-date="${item.date}">
-            <span class="date-day">${Number(item.date.slice(8, 10))}</span>
-            <span class="date-weekday">${weekday}</span>
-            <span class="date-count">${item.session_count} 场直播</span>
+            ${coverMarkup(item.cover_message_id, 'date-cover')}
+            <span class="date-copy">
+              <span class="date-title">${Number(monthNumber)} 月 ${Number(item.date.slice(8, 10))} 日</span>
+              <span class="date-meta">${weekday} · ${item.session_count} 场直播</span>
+            </span>
           </button>`;
         }).join('')}</div>
       </section>`;
     }).join('')}</div>`;
+  bindCoverFallbacks(app);
   document.querySelector('[data-back]').addEventListener('click', () => { location.hash = '#/'; });
   document.querySelectorAll('.date-card').forEach(card => {
     card.addEventListener('click', () => {
@@ -172,12 +220,16 @@ async function renderDate(streamer, date) {
   loading('正在读取当天录像…');
   const sessions = await api('/api/sessions', { streamer, date });
   app.innerHTML = `
-    <button class="back-button" type="button" data-back>← ${escapeHtml(streamer)}</button>
-    <section class="page-heading">
+    <nav class="breadcrumb" aria-label="当前位置">
+      <button type="button" data-back>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+        ${escapeHtml(streamer)}
+      </button>
+    </nav>
+    <section class="detail-heading watch-heading">
       <div class="heading-copy">
-        <p class="eyebrow">${escapeHtml(streamer)}</p>
         <h1>${escapeHtml(formatDate(date))}</h1>
-        <p class="page-subtitle">当天共 ${sessions.length} 场直播</p>
+        <p class="page-subtitle">${escapeHtml(streamer)} · ${sessions.length} 场直播</p>
       </div>
     </section>
     ${sessions.length ? `<div class="watch-layout">
@@ -185,7 +237,10 @@ async function renderDate(streamer, date) {
         <div id="playerMount"></div>
         <div id="playerDescription" class="player-description"></div>
       </div>
-      <aside id="sessionList" class="session-list" aria-label="当天直播列表"></aside>
+      <aside class="session-panel">
+        <div class="session-panel-heading"><h2>当天录播</h2><span>${sessions.length}</span></div>
+        <div id="sessionList" class="session-list" aria-label="当天直播列表"></div>
+      </aside>
     </div>` : '<section class="empty-state"><p>当天没有可用录像</p></section>'}`;
   document.querySelector('[data-back]').addEventListener('click', () => {
     location.hash = `#/streamer/${encodeURIComponent(streamer)}`;
@@ -195,13 +250,13 @@ async function renderDate(streamer, date) {
   const list = document.querySelector('#sessionList');
   list.innerHTML = sessions.map((session, index) => `
     <button class="session-card" type="button" data-session="${index}">
-      <div class="session-time">${escapeHtml(session.time.slice(0, 5))}</div>
-      <div class="session-meta">
-        <span>${escapeHtml(session.platform)}</span>
-        <span class="dot">${session.part_count} 段</span>
-        <span class="dot">${formatDuration(session.total_duration)}</span>
-      </div>
+      ${coverMarkup(session.parts[0]?.message_id, 'session-cover')}
+      <span class="session-copy">
+        <span class="session-time">${escapeHtml(session.time.slice(0, 5))}</span>
+        <span class="session-meta">${escapeHtml(session.platform)} · ${session.part_count} 段 · ${formatDuration(session.total_duration)}</span>
+      </span>
     </button>`).join('');
+  bindCoverFallbacks(list);
 
   const selectSession = index => {
     if (activePlayer) activePlayer.destroy();
@@ -209,7 +264,7 @@ async function renderDate(streamer, date) {
     const session = sessions[index];
     activePlayer = new MergedPlayer(document.querySelector('#playerMount'), session);
     document.querySelector('#playerDescription').innerHTML = `
-      <div><h2>${escapeHtml(session.time.slice(0, 5))} 开播</h2><p>${escapeHtml(session.platform)} · ${session.part_count} 个录像分片</p></div>`;
+      <div><h2>${escapeHtml(session.time.slice(0, 5))} 开播</h2><p>${escapeHtml(session.platform)} · ${session.part_count} 个分片连续播放</p></div>`;
   };
   list.querySelectorAll('.session-card').forEach(card => card.addEventListener('click', () => selectSession(Number(card.dataset.session))));
   selectSession(0);
@@ -221,14 +276,15 @@ class MergedPlayer {
     this.parts = session.parts.filter(part => part.available);
     this.index = 0;
     this.destroyed = false;
+    const posterId = this.parts[0]?.message_id;
     this.mount.innerHTML = `
       <div class="player-shell">
         <div class="video-stage">
-          <video playsinline preload="none"></video>
+          <video playsinline preload="none"${posterId ? ` poster="/api/thumbnail/${posterId}"` : ''}></video>
           <div class="video-placeholder"><strong>${this.parts.length ? '点击播放' : '录像不可用'}</strong><span>${this.parts.length ? '视频直接从 Telegram 读取' : '频道消息可能已被删除'}</span></div>
         </div>
         <div class="player-controls">
-          <button class="player-button play-button" type="button" aria-label="播放">▶</button>
+          <button class="player-button play-button" type="button" aria-label="播放">${playerIcons.play}</button>
           <input class="timeline" type="range" min="0" max="1" value="0" step="0.1" aria-label="播放进度">
           <span class="player-time">00:00 / 00:00</span>
           <span class="part-indicator">第 1 / ${Math.max(1, this.parts.length)} 段</span>
@@ -236,8 +292,8 @@ class MergedPlayer {
             <option value="0.75">0.75×</option><option value="1" selected>1×</option>
             <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
           </select>
-          <button class="player-button mute-button" type="button" aria-label="静音">♬</button>
-          <button class="player-button fullscreen-button" type="button" aria-label="全屏">⛶</button>
+          <button class="player-button mute-button" type="button" aria-label="静音">${playerIcons.volume}</button>
+          <button class="player-button fullscreen-button" type="button" aria-label="全屏">${playerIcons.fullscreen}</button>
         </div>
       </div>`;
     this.root = mount.querySelector('.player-shell');
@@ -256,8 +312,8 @@ class MergedPlayer {
     this.togglePlay = () => this.video.paused ? this.video.play().catch(() => {}) : this.video.pause();
     this.playButton.addEventListener('click', this.togglePlay);
     this.video.addEventListener('click', this.togglePlay);
-    this.video.addEventListener('play', () => { this.playButton.textContent = 'Ⅱ'; this.placeholder.hidden = true; });
-    this.video.addEventListener('pause', () => { this.playButton.textContent = '▶'; });
+    this.video.addEventListener('play', () => { this.playButton.innerHTML = playerIcons.pause; this.placeholder.hidden = true; });
+    this.video.addEventListener('pause', () => { this.playButton.innerHTML = playerIcons.play; });
     this.video.addEventListener('timeupdate', () => this.updateProgress());
     this.video.addEventListener('durationchange', () => {
       if (Number.isFinite(this.video.duration) && this.video.duration > 0 && !this.parts[this.index].duration) {
@@ -275,7 +331,7 @@ class MergedPlayer {
     this.mount.querySelector('.rate-select').addEventListener('change', event => { this.video.playbackRate = Number(event.target.value); });
     this.mount.querySelector('.mute-button').addEventListener('click', event => {
       this.video.muted = !this.video.muted;
-      event.currentTarget.textContent = this.video.muted ? '×' : '♬';
+      event.currentTarget.innerHTML = this.video.muted ? playerIcons.muted : playerIcons.volume;
     });
     this.mount.querySelector('.fullscreen-button').addEventListener('click', () => {
       if (this.root.requestFullscreen) this.root.requestFullscreen();
