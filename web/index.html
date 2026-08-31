@@ -54,6 +54,24 @@
     </div>
   </header>
 
+  <aside class="side-nav" aria-label="主导航">
+    <span class="side-nav-label">浏览</span>
+    <a href="#/" class="side-nav-item" data-nav-home>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 9-8 9 8v9h-6v-6H9v6H3v-9Z"/></svg>
+      <span>首页</span>
+    </a>
+    <span class="side-nav-divider" aria-hidden="true"></span>
+    <span class="side-nav-label">主播排序</span>
+    <button type="button" class="side-nav-item" data-nav-sort="recent">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      <span>最近更新</span>
+    </button>
+    <button type="button" class="side-nav-item" data-nav-sort="name">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h10M5 17h7"/></svg>
+      <span>名称索引</span>
+    </button>
+  </aside>
+
   <main id="app" class="app-shell" aria-live="polite">
     <div class="loading-state">
       <span class="spinner"></span>

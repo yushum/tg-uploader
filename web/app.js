@@ -5,6 +5,7 @@ const themeLabel = document.querySelector('#themeLabel');
 const themeMenu = document.querySelector('#themeMenu');
 const siteSearch = document.querySelector('#siteSearch');
 const siteSearchInput = document.querySelector('#siteSearchInput');
+const sideNav = document.querySelector('.side-nav');
 const deviceTheme = window.matchMedia('(prefers-color-scheme: dark)');
 const nameCollator = new Intl.Collator('zh-CN-u-co-pinyin', { numeric: true, sensitivity: 'base' });
 
@@ -27,6 +28,16 @@ let activePlayer = null;
 let homeSort = 'recent';
 let homeQuery = '';
 let homeRenderer = null;
+
+function updateNavigation(page) {
+  sideNav.classList.toggle('is-hidden', page === 'watch');
+  document.querySelector('[data-nav-home]').classList.toggle('active', page === 'home');
+  document.querySelectorAll('[data-nav-sort]').forEach(button => {
+    const selected = button.dataset.navSort === homeSort;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
+}
 
 function applyTheme() {
   const resolved = themeMode === 'auto' ? (deviceTheme.matches ? 'dark' : 'light') : themeMode;
@@ -67,6 +78,8 @@ document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
     themeMenu.hidden = true;
     themeButton.setAttribute('aria-expanded', 'false');
+    siteSearch.classList.remove('expanded');
+    document.querySelector('.header-inner').classList.remove('searching');
   }
 });
 deviceTheme.addEventListener('change', () => { if (themeMode === 'auto') applyTheme(); });
@@ -74,7 +87,15 @@ applyTheme();
 
 siteSearch.addEventListener('submit', event => {
   event.preventDefault();
+  if (window.matchMedia('(max-width: 620px)').matches && !siteSearch.classList.contains('expanded')) {
+    siteSearch.classList.add('expanded');
+    document.querySelector('.header-inner').classList.add('searching');
+    siteSearchInput.focus();
+    return;
+  }
   homeQuery = siteSearchInput.value.trim();
+  siteSearch.classList.remove('expanded');
+  document.querySelector('.header-inner').classList.remove('searching');
   if (location.hash.replace(/^#\/?/, '').startsWith('streamer')) location.hash = '#/';
   else homeRenderer?.();
 });
@@ -85,6 +106,18 @@ siteSearchInput.addEventListener('input', () => {
 document.querySelector('.brand').addEventListener('click', () => {
   homeQuery = '';
   siteSearchInput.value = '';
+  siteSearch.classList.remove('expanded');
+  document.querySelector('.header-inner').classList.remove('searching');
+});
+document.querySelectorAll('[data-nav-sort]').forEach(button => {
+  button.addEventListener('click', () => {
+    homeSort = button.dataset.navSort;
+    if (location.hash.replace(/^#\/?/, '').startsWith('streamer')) location.hash = '#/';
+    else {
+      updateNavigation('home');
+      homeRenderer?.();
+    }
+  });
 });
 
 function escapeHtml(value) {
@@ -174,6 +207,7 @@ async function renderHome() {
   loading('正在加载主播…');
   const streamers = await api('/api/streamers');
   app.dataset.page = 'home';
+  updateNavigation('home');
   app.innerHTML = `
     <section class="content-heading">
       <div>
@@ -199,6 +233,11 @@ async function renderHome() {
       const active = button.dataset.sort === homeSort;
       button.classList.toggle('active', active);
       button.setAttribute('aria-pressed', String(active));
+    });
+    document.querySelectorAll('[data-nav-sort]').forEach(button => {
+      const selected = button.dataset.navSort === homeSort;
+      button.classList.toggle('selected', selected);
+      button.setAttribute('aria-pressed', String(selected));
     });
     grid.innerHTML = visible.length ? visible.map(item => `
       <button class="video-card streamer-card" type="button" data-name="${escapeHtml(item.name)}">
@@ -227,6 +266,7 @@ async function renderStreamer(streamer) {
   loading(`正在读取 ${streamer} 的直播日期…`);
   const dates = await api('/api/dates', { streamer });
   app.dataset.page = 'channel';
+  updateNavigation('channel');
   const groups = new Map();
   dates.forEach(item => {
     const month = item.date.slice(0, 7);
@@ -234,7 +274,6 @@ async function renderStreamer(streamer) {
     groups.get(month).push(item);
   });
   const latestCover = dates[0]?.cover_message_id;
-  const coverUrl = latestCover ? `/api/thumbnail/${Number(latestCover)}` : '';
   app.innerHTML = `
     <nav class="breadcrumb" aria-label="当前位置">
       <button type="button" data-back>
@@ -243,7 +282,6 @@ async function renderStreamer(streamer) {
       </button>
     </nav>
     <section class="channel-shell">
-      <div class="channel-banner"${coverUrl ? ` style="--cover-image:url('${coverUrl}')"` : ''}></div>
       <div class="channel-profile">
         ${coverMarkup(latestCover, 'channel-avatar')}
         <div>
@@ -253,9 +291,15 @@ async function renderStreamer(streamer) {
       </div>
     </section>
     <div class="channel-tabs"><span>直播归档</span></div>
+    ${groups.size ? `<nav class="month-jump" aria-label="按月份快速定位">
+      ${[...groups].map(([month]) => {
+        const [year, monthNumber] = month.split('-');
+        return `<button type="button" data-month="${month}">${year}/${monthNumber}</button>`;
+      }).join('')}
+    </nav>` : ''}
     <div>${[...groups].map(([month, items]) => {
       const [year, monthNumber] = month.split('-');
-      return `<section class="month-section">
+      return `<section class="month-section" data-month-section="${month}">
         <div class="month-heading"><h2>${year} 年 ${Number(monthNumber)} 月</h2><span>${items.length} 个日期</span></div>
         <div class="date-grid">${items.map(item => {
           const parsedDate = new Date(`${item.date}T00:00:00`);
@@ -272,6 +316,12 @@ async function renderStreamer(streamer) {
     }).join('')}</div>`;
   bindCovers(app);
   document.querySelector('[data-back]').addEventListener('click', () => { location.hash = '#/'; });
+  document.querySelectorAll('[data-month]').forEach(button => {
+    button.addEventListener('click', () => {
+      document.querySelector(`[data-month-section="${button.dataset.month}"]`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
   document.querySelectorAll('.date-card').forEach(card => {
     card.addEventListener('click', () => {
       location.hash = `#/streamer/${encodeURIComponent(streamer)}/${card.dataset.date}`;
@@ -283,6 +333,7 @@ async function renderDate(streamer, date) {
   loading('正在读取当天录像…');
   const sessions = await api('/api/sessions', { streamer, date });
   app.dataset.page = 'watch';
+  updateNavigation('watch');
   app.innerHTML = `
     <nav class="breadcrumb" aria-label="当前位置">
       <button type="button" data-back>

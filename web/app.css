@@ -175,9 +175,51 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .theme-check { visibility: hidden; color: var(--accent); }
 .theme-menu button.selected .theme-check { visibility: visible; }
 
+.side-nav {
+  position: fixed;
+  z-index: 30;
+  top: 64px;
+  bottom: 0;
+  left: 0;
+  width: 216px;
+  padding: 18px 12px;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+}
+.side-nav.is-hidden { display: none; }
+.side-nav-label {
+  display: block;
+  padding: 0 14px 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .04em;
+}
+.side-nav-divider { display: block; height: 1px; margin: 14px 2px; background: var(--line); }
+.side-nav-item {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  text-align: left;
+  text-decoration: none;
+}
+.side-nav-item:hover, .side-nav-item.active { background: var(--surface); }
+.side-nav-item.active { font-weight: 680; }
+.side-nav-item.selected { color: var(--accent); }
+.side-nav-item svg { flex: 0 0 auto; width: 21px; height: 21px; }
+
 .app-shell {
-  width: min(1520px, calc(100% - 48px));
-  margin: 0 auto;
+  width: auto;
+  margin: 0 24px 0 240px;
   padding: 34px 0 76px;
 }
 
@@ -193,7 +235,7 @@ h1, h2, p { margin-top: 0; }
 .content-heading h1 { margin-bottom: 5px; font-size: 26px; line-height: 1.2; letter-spacing: -.035em; }
 .content-heading p { margin: 0; color: var(--muted); font-size: 13px; }
 
-.sort-switch { display: flex; gap: 8px; }
+.sort-switch { display: none; gap: 8px; }
 .sort-switch button {
   height: 36px;
   padding: 0 15px;
@@ -333,42 +375,18 @@ h1, h2, p { margin-top: 0; }
 .breadcrumb button:hover { color: var(--text); }
 .breadcrumb svg { width: 17px; height: 17px; }
 
-.channel-banner {
-  position: relative;
-  overflow: hidden;
-  width: 100%;
-  min-height: 170px;
-  aspect-ratio: 7 / 1;
-  border-radius: 16px;
-  background: var(--surface);
-}
-.channel-banner::before {
-  position: absolute;
-  inset: -40px;
-  background-image: var(--cover-image);
-  background-position: center 38%;
-  background-size: cover;
-  content: "";
-  filter: blur(18px) saturate(.82) brightness(.8);
-  transform: scale(1.08);
-}
-.channel-banner::after { position: absolute; inset: 0; background: rgba(0, 0, 0, .14); content: ""; }
-
 .channel-profile {
-  position: relative;
-  z-index: 2;
   display: flex;
   gap: 20px;
-  align-items: flex-end;
-  min-height: 112px;
-  margin-top: -48px;
-  padding: 0 30px 18px;
+  align-items: center;
+  min-height: 124px;
+  padding: 8px 0 24px;
 }
 .channel-avatar {
   flex: 0 0 auto;
   width: 112px;
   aspect-ratio: 1;
-  border: 5px solid var(--bg);
+  border: 0;
   border-radius: 50%;
 }
 .channel-avatar::before { display: none; }
@@ -377,7 +395,7 @@ h1, h2, p { margin-top: 0; }
 .channel-profile p { margin: 0; color: var(--muted); font-size: 13px; }
 
 .channel-tabs {
-  margin-bottom: 30px;
+  margin-bottom: 0;
   border-bottom: 1px solid var(--line);
 }
 .channel-tabs span {
@@ -391,12 +409,40 @@ h1, h2, p { margin-top: 0; }
 }
 .channel-tabs span::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 3px; background: var(--accent); content: ""; }
 
+.month-jump {
+  position: sticky;
+  z-index: 20;
+  top: 64px;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  margin-bottom: 28px;
+  padding: 12px 0;
+  background: var(--bg);
+  scrollbar-width: none;
+}
+.month-jump::-webkit-scrollbar { display: none; }
+.month-jump button {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+.month-jump button:hover { background: var(--surface-hover); }
+
+.month-section { scroll-margin-top: 122px; }
 .month-section + .month-section { margin-top: 52px; }
 .month-heading { display: flex; gap: 10px; align-items: baseline; margin-bottom: 18px; }
 .month-heading h2 { margin: 0; font-size: 20px; letter-spacing: -.025em; }
 .month-heading span { color: var(--muted); font-size: 12px; }
 
-[data-page="watch"] { width: min(1560px, calc(100% - 40px)); }
+[data-page="watch"] { width: auto; margin: 0 20px; }
 .watch-layout { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 24px; align-items: start; }
 .player-shell { position: relative; overflow: hidden; border-radius: 12px; background: #000; }
 .video-stage { position: relative; overflow: hidden; width: 100%; aspect-ratio: 16 / 9; background: #000; }
@@ -514,9 +560,13 @@ h1, h2, p { margin-top: 0; }
   .header-inner { grid-template-columns: auto minmax(220px, 1fr) auto; gap: 18px; padding: 0 18px; }
   #themeLabel, .theme-button .chevron { display: none; }
   .theme-button { width: 40px; padding: 0; justify-content: center; }
-  .app-shell { width: min(100% - 36px, 860px); }
+  .side-nav { width: 72px; padding: 12px 8px; }
+  .side-nav-label { display: none; }
+  .side-nav-divider { margin: 10px 4px; }
+  .side-nav-item { flex-direction: column; gap: 4px; height: 64px; padding: 8px 4px; justify-content: center; font-size: 10px; text-align: center; }
+  .app-shell { width: auto; margin: 0 18px 0 90px; }
   .video-grid, .date-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  [data-page="watch"] { width: min(100% - 32px, 860px); }
+  [data-page="watch"] { width: auto; margin: 0 16px; }
   .watch-layout { grid-template-columns: 1fr; }
   .session-list { max-height: none; }
   .session-card { grid-template-columns: 150px minmax(0, 1fr); }
@@ -524,35 +574,42 @@ h1, h2, p { margin-top: 0; }
 
 @media (max-width: 620px) {
   .site-header { height: 58px; }
-  .header-inner { grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; padding: 0 12px; }
+  .header-inner { position: relative; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; padding: 0 12px; }
   .brand { gap: 7px; }
-  .brand-name { display: none; }
+  .brand-name { display: block; font-size: 15px; }
   .brand-mark { width: 30px; }
-  .site-search { height: 38px; grid-template-columns: minmax(0, 1fr) 46px; }
-  .site-search input { padding: 0 13px; font-size: 14px; }
+  .site-search { grid-template-columns: 40px; width: 40px; height: 40px; justify-self: end; }
+  .site-search input { display: none; }
+  .site-search button { width: 40px; border: 0; border-radius: 50%; background: transparent; }
   .site-search button svg { width: 19px; height: 19px; }
+  .site-search.expanded { position: absolute; z-index: 4; inset: 9px 12px; display: grid; grid-template-columns: minmax(0, 1fr) 46px; width: auto; height: 40px; }
+  .site-search.expanded input { display: block; padding: 0 14px; font-size: 14px; background: var(--bg); }
+  .site-search.expanded button { width: 46px; border: 1px solid var(--line); border-radius: 0 22px 22px 0; background: var(--surface); }
+  .header-inner.searching .brand, .header-inner.searching .theme-picker { visibility: hidden; }
   .theme-menu { top: calc(100% + 7px); }
-  .app-shell { width: calc(100% - 24px); padding: 26px 0 56px; }
+  .side-nav { display: none; }
+  .app-shell { width: calc(100% - 24px); margin: 0 auto; padding: 26px 0 56px; }
   .content-heading { align-items: center; margin-bottom: 22px; }
   .content-heading h1 { font-size: 23px; }
   .content-heading p { display: none; }
-  .sort-switch { gap: 6px; }
+  .sort-switch { display: flex; gap: 6px; }
   .sort-switch button { height: 34px; padding: 0 11px; font-size: 12px; }
-  .video-grid, .date-grid { grid-template-columns: 1fr; gap: 31px; }
+  .video-grid { grid-template-columns: 1fr; gap: 31px; }
+  .date-grid { grid-template-columns: 1fr; gap: 31px; }
   .cover-frame { border-radius: 10px; }
   .video-copy { padding: 10px 2px 0; }
   .video-title { font-size: 15px; }
   .breadcrumb { margin-bottom: 18px; }
-  .channel-banner { min-height: 105px; aspect-ratio: 3.2 / 1; border-radius: 11px; }
-  .channel-profile { gap: 13px; min-height: 78px; margin-top: -31px; padding: 0 12px 13px; }
-  .channel-avatar { width: 78px; border-width: 4px; }
+  .channel-profile { gap: 13px; min-height: 78px; padding: 0 2px 18px; }
+  .channel-avatar { width: 78px; }
   .channel-profile h1 { margin-bottom: 5px; font-size: 23px; }
   .channel-profile p { font-size: 11px; }
-  .channel-tabs { margin-bottom: 26px; }
+  .month-jump { top: 58px; margin-bottom: 22px; }
+  .month-section { scroll-margin-top: 116px; }
   .month-section + .month-section { margin-top: 44px; }
   .month-heading { margin-bottom: 14px; }
   .month-heading h2 { font-size: 18px; }
-  [data-page="watch"] { width: 100%; padding-top: 18px; }
+  [data-page="watch"] { width: 100%; margin: 0; padding-top: 18px; }
   [data-page="watch"] .breadcrumb { margin-right: 12px; margin-left: 12px; }
   .watch-layout { gap: 22px; }
   .player-shell { border-radius: 0; }
