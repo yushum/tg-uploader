@@ -32,9 +32,9 @@ class FakeTelegram:
         self.data = data
         self.downloads = 0
 
-    def iter_download(self, _document, *, offset, file_size, **_kwargs):
+    def iter_download(self, _document, *, offset, file_size, limit=1, **_kwargs):
         self.downloads += 1
-        end = min(file_size, offset + web_app.MEDIA_CACHE_BLOCK_SIZE)
+        end = min(file_size, offset + web_app.MEDIA_CACHE_BLOCK_SIZE * limit)
         return FakeDownloadIterator(self.data[offset:end])
 
 
@@ -61,7 +61,9 @@ class MediaCacheTests(unittest.IsolatedAsyncioTestCase):
                 results = await asyncio.gather(
                     *(web_app._media_block(message, details, 99, 0) for _ in range(4))
                 )
+                await asyncio.gather(*list(web_app.media_prefetch_tasks))
                 cached, hit = await web_app._media_block(message, details, 99, 0)
+                prefetched, prefetched_hit = await web_app._media_block(message, details, 99, 1)
 
         self.assertEqual(fake_telegram.downloads, 1)
         self.assertTrue(all(result == data[: web_app.MEDIA_CACHE_BLOCK_SIZE] for result, _hit in results))
@@ -69,6 +71,23 @@ class MediaCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(hit for _result, hit in results[1:]))
         self.assertTrue(hit)
         self.assertEqual(cached, data[: web_app.MEDIA_CACHE_BLOCK_SIZE])
+        self.assertTrue(prefetched_hit)
+        self.assertEqual(prefetched, data[web_app.MEDIA_CACHE_BLOCK_SIZE :])
+        self.assertFalse(web_app.media_cache_inflight)
+
+    async def test_failed_prefetch_releases_all_inflight_entries(self):
+        details = {"size": web_app.MEDIA_CACHE_BLOCK_SIZE * 2, "mime_type": "video/mp4"}
+        message = SimpleNamespace(document=object())
+        fake_telegram = FakeTelegram(b"short")
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(web_app, "MEDIA_CACHE_DIR", Path(temporary)), patch.object(
+                web_app, "telegram", fake_telegram
+            ):
+                with self.assertRaises(RuntimeError):
+                    await web_app._media_block(message, details, 100, 0)
+                await asyncio.gather(*list(web_app.media_prefetch_tasks), return_exceptions=True)
+
+        self.assertFalse(web_app.media_cache_inflight)
 
     def test_media_headers_are_cacheable_and_range_aware(self):
         headers = web_app._media_headers(

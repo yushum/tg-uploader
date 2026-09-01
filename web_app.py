@@ -36,11 +36,13 @@ MEDIA_CACHE_DIR = Path(os.getenv("MEDIA_CACHE_DIR", "/tmp/tg-uploader-media-cach
 MEDIA_CACHE_MAX_BYTES = max(64, int(os.getenv("MEDIA_CACHE_MAX_MB", "1024"))) * 1024 * 1024
 MEDIA_CACHE_BLOCK_SIZE = 512 * 1024
 MEDIA_CACHE_MAX_AGE = max(60, int(os.getenv("MEDIA_CACHE_MAX_AGE", "86400")))
+MEDIA_PREFETCH_BLOCKS = max(1, min(int(os.getenv("MEDIA_PREFETCH_BLOCKS", "8")), 64))
 
 telegram: TelegramClient | None = None
 stream_slots = asyncio.Semaphore(MAX_STREAMS)
 thumbnail_slots = asyncio.Semaphore(6)
-media_cache_locks: dict[tuple[int, int, int], asyncio.Lock] = {}
+media_cache_inflight: dict[tuple[int, int, int], asyncio.Future[bytes]] = {}
+media_prefetch_tasks: set[asyncio.Task] = set()
 media_cache_cleanup_lock = asyncio.Lock()
 last_media_cache_cleanup = 0.0
 
@@ -98,6 +100,11 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        if media_prefetch_tasks:
+            tasks = tuple(media_prefetch_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         await telegram.disconnect()
         telegram = None
 
@@ -363,6 +370,128 @@ async def _maybe_cleanup_media_cache() -> None:
             logger.info("Media cache pruned %.1f MiB; %.1f MiB remain", removed / 1024**2, total / 1024**2)
 
 
+def _consume_future_exception(future: asyncio.Future) -> None:
+    """Retrieve background prefetch failures when no request awaited that block."""
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except asyncio.CancelledError:
+        pass
+
+
+def _finish_prefetch_task(task: asyncio.Task) -> None:
+    media_prefetch_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+
+
+def _claim_media_batch(message_id: int, file_size: int, first_block: int):
+    """Atomically reserve a contiguous read-ahead window on the event loop."""
+    first_key = (message_id, file_size, first_block)
+    existing = media_cache_inflight.get(first_key)
+    if existing is not None:
+        return existing, []
+
+    loop = asyncio.get_running_loop()
+    total_blocks = math.ceil(file_size / MEDIA_CACHE_BLOCK_SIZE)
+    claims = []
+    for block_index in range(first_block, min(total_blocks, first_block + MEDIA_PREFETCH_BLOCKS)):
+        key = (message_id, file_size, block_index)
+        # Do not overlap another contiguous downloader. The first block was
+        # checked above; encountering an in-flight read here simply shortens
+        # this prefetch window.
+        if key in media_cache_inflight:
+            break
+        future = loop.create_future()
+        future.add_done_callback(_consume_future_exception)
+        media_cache_inflight[key] = future
+        claims.append((key, block_index, future))
+    return claims[0][2], claims
+
+
+async def _download_media_batch(message, details: dict, message_id: int, claims) -> None:
+    """Download several adjacent cache blocks through one Telegram iterator."""
+    iterator = None
+    buffered = bytearray()
+    claim_position = 0
+    first_block = claims[0][1]
+    expected_total = sum(
+        min(MEDIA_CACHE_BLOCK_SIZE, details["size"] - block_index * MEDIA_CACHE_BLOCK_SIZE)
+        for _key, block_index, _future in claims
+    )
+    received = 0
+
+    try:
+        async with stream_slots:
+            try:
+                iterator = telegram.iter_download(
+                    message.document,
+                    offset=first_block * MEDIA_CACHE_BLOCK_SIZE,
+                    limit=len(claims),
+                    chunk_size=MEDIA_CACHE_BLOCK_SIZE,
+                    request_size=MEDIA_CACHE_BLOCK_SIZE,
+                    file_size=details["size"],
+                )
+                async for chunk in iterator:
+                    chunk = bytes(chunk)
+                    received += len(chunk)
+                    buffered.extend(chunk)
+
+                    while claim_position < len(claims):
+                        key, block_index, future = claims[claim_position]
+                        expected_size = min(
+                            MEDIA_CACHE_BLOCK_SIZE,
+                            details["size"] - block_index * MEDIA_CACHE_BLOCK_SIZE,
+                        )
+                        if len(buffered) < expected_size:
+                            break
+                        data = bytes(buffered[:expected_size])
+                        del buffered[:expected_size]
+                        path = _media_cache_path(message_id, details["size"], block_index)
+                        await asyncio.to_thread(_write_cache_block, path, data)
+                        if not future.done():
+                            future.set_result(data)
+                        if media_cache_inflight.get(key) is future:
+                            media_cache_inflight.pop(key, None)
+                        claim_position += 1
+            finally:
+                if iterator is not None:
+                    await iterator.close()
+
+        if claim_position != len(claims):
+            raise RuntimeError(
+                f"Telegram returned {received} of {expected_total} bytes "
+                f"for message {message_id} blocks {first_block}-{claims[-1][1]}"
+            )
+        await _maybe_cleanup_media_cache()
+    except asyncio.CancelledError:
+        for _key, _block_index, future in claims[claim_position:]:
+            if not future.done():
+                future.cancel()
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Media prefetch failed message=%s blocks=%s-%s: %s",
+            message_id,
+            first_block,
+            claims[-1][1],
+            exc,
+        )
+        for _key, _block_index, future in claims[claim_position:]:
+            if not future.done():
+                future.set_exception(exc)
+        raise
+    finally:
+        for key, _block_index, future in claims:
+            if media_cache_inflight.get(key) is future:
+                media_cache_inflight.pop(key, None)
+
+
 async def _media_block(message, details: dict, message_id: int, block_index: int) -> tuple[bytes, bool]:
     block_start = block_index * MEDIA_CACHE_BLOCK_SIZE
     expected_size = min(MEDIA_CACHE_BLOCK_SIZE, details["size"] - block_start)
@@ -371,42 +500,17 @@ async def _media_block(message, details: dict, message_id: int, block_index: int
     if cached is not None:
         return cached, True
 
-    key = (message_id, details["size"], block_index)
-    lock = media_cache_locks.setdefault(key, asyncio.Lock())
-    async with lock:
-        cached = await asyncio.to_thread(_read_cache_block, path, expected_size)
-        if cached is not None:
-            return cached, True
+    requested, claims = _claim_media_batch(message_id, details["size"], block_index)
+    if not claims:
+        # A concurrent request or an earlier read-ahead operation owns this
+        # block. Shield it so cancelling one HTTP request does not cancel the
+        # shared Telegram download.
+        return await asyncio.shield(requested), True
 
-        iterator = None
-        chunks = bytearray()
-        async with stream_slots:
-            try:
-                iterator = telegram.iter_download(
-                    message.document,
-                    offset=block_start,
-                    limit=math.ceil(expected_size / MEDIA_CACHE_BLOCK_SIZE),
-                    chunk_size=MEDIA_CACHE_BLOCK_SIZE,
-                    request_size=MEDIA_CACHE_BLOCK_SIZE,
-                    file_size=details["size"],
-                )
-                async for chunk in iterator:
-                    chunks.extend(bytes(chunk))
-                    if len(chunks) >= expected_size:
-                        break
-            finally:
-                if iterator is not None:
-                    await iterator.close()
-
-        data = bytes(chunks[:expected_size])
-        if len(data) != expected_size:
-            raise RuntimeError(
-                f"Telegram returned {len(data)} of {expected_size} bytes "
-                f"for message {message_id} block {block_index}"
-            )
-        await asyncio.to_thread(_write_cache_block, path, data)
-        await _maybe_cleanup_media_cache()
-        return data, False
+    task = asyncio.create_task(_download_media_batch(message, details, message_id, claims))
+    media_prefetch_tasks.add(task)
+    task.add_done_callback(_finish_prefetch_task)
+    return await asyncio.shield(requested), False
 
 
 def _media_headers(message_id: int, details: dict, start: int, end: int, partial: bool) -> dict[str, str]:

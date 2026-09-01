@@ -18,6 +18,7 @@ services:
       - MEDIA_CACHE_DIR=/app/cache
       - MEDIA_CACHE_MAX_MB=${MEDIA_CACHE_MAX_MB:-2048}
       - MEDIA_CACHE_MAX_AGE=${MEDIA_CACHE_MAX_AGE:-86400}
+      - MEDIA_PREFETCH_BLOCKS=${MEDIA_PREFETCH_BLOCKS:-8}
       
       # [Optional] Custom Device Name
       # - DEVICE_MODEL=TG-Uploader
