@@ -23,6 +23,7 @@ const playerIcons = {
   volume: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6 7 10H4v4h3l4 4V6ZM15 9a4 4 0 0 1 0 6M17.5 6.5a8 8 0 0 1 0 11"/></svg>',
   muted: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6 7 10H4v4h3l4 4V6ZM16 10l4 4M20 10l-4 4"/></svg>',
   pip: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 12h7v5h-7z"/></svg>',
+  rotate: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V3m0 0h5M4 3l3.4 3.4A8 8 0 1 1 4.3 15"/></svg>',
   fullscreen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>',
   fullscreenExit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></svg>'
 };
@@ -415,7 +416,7 @@ async function renderDate(streamer, date) {
     activePlayer = new MergedPlayer(document.querySelector('#playerMount'), session);
     document.querySelector('#playerDescription').innerHTML = `
       <h1>${escapeHtml(streamer)} · ${escapeHtml(formatCardDate(date))} ${escapeHtml(session.time.slice(0, 5))} 直播回放</h1>
-      <p>${escapeHtml(session.platform)} · ${session.part_count} 个分片连续播放 · 原始视频由 Telegram 提供</p>`;
+      <p>${escapeHtml(session.platform)} · ${session.part_count} 个分片</p>`;
   };
   list.querySelectorAll('.session-card').forEach(card => card.addEventListener('click', () => selectSession(Number(card.dataset.session))));
   selectSession(0);
@@ -443,7 +444,7 @@ class MergedPlayer {
       <div class="player-shell show-controls" tabindex="0" data-player-state="idle">
         <div class="video-stage">
           <video playsinline preload="metadata"${posterId ? ` poster="/api/thumbnail/${posterId}"` : ''}></video>
-          <div class="video-placeholder"><strong>${this.parts.length ? '点击播放' : '录像不可用'}</strong><span>${this.parts.length ? '视频直接从 Telegram 读取' : '频道消息可能已被删除'}</span></div>
+          <div class="video-placeholder"><strong>${this.parts.length ? '点击播放' : '录像不可用'}</strong>${this.parts.length ? '' : '<span>频道消息可能已被删除</span>'}</div>
           <div class="player-gesture-layer" aria-hidden="true"></div>
           <button class="center-play" type="button" aria-label="播放">${playerIcons.play}</button>
           <div class="player-spinner" role="status" aria-label="正在缓冲"><span></span></div>
@@ -478,6 +479,7 @@ class MergedPlayer {
               <option value="2">2×</option><option value="2.5">2.5×</option><option value="3">3×</option>
             </select>
             <button class="player-button pip-button" type="button" aria-label="画中画">${playerIcons.pip}</button>
+            <button class="player-button rotate-button" type="button" aria-label="顺时针旋转 90 度" title="旋转（R）">${playerIcons.rotate}</button>
             <button class="player-button fullscreen-button" type="button" aria-label="全屏">${playerIcons.fullscreen}</button>
           </div>
         </div>
@@ -499,9 +501,11 @@ class MergedPlayer {
     this.volumeSlider = mount.querySelector('.volume-slider');
     this.muteButton = mount.querySelector('.mute-button');
     this.pipButton = mount.querySelector('.pip-button');
+    this.rotateButton = mount.querySelector('.rotate-button');
     this.fullscreenButton = mount.querySelector('.fullscreen-button');
     this.bind();
     this.restorePreferences();
+    this.restoreRotation();
     this.recalculate();
     if (this.parts.length) {
       if (Number.isInteger(options.startPartIndex)) {
@@ -599,6 +603,7 @@ class MergedPlayer {
       this.syncVolume();
     });
     this.listen(this.pipButton, 'click', () => this.togglePictureInPicture());
+    this.listen(this.rotateButton, 'click', () => this.rotateVideo());
     this.listen(this.fullscreenButton, 'click', () => this.toggleFullscreen());
     this.listen(document, 'fullscreenchange', () => this.syncFullscreen());
     this.listen(document, 'webkitfullscreenchange', () => this.syncFullscreen());
@@ -612,6 +617,11 @@ class MergedPlayer {
     this.listen(this.gestureLayer, 'pointercancel', () => this.handleLongPressEnd());
     this.listen(this.gestureLayer, 'pointerleave', () => this.handleLongPressEnd());
     this.listen(document, 'keydown', event => this.handleKeydown(event));
+
+    if ('ResizeObserver' in window) {
+      this.stageResizeObserver = new ResizeObserver(() => this.syncRotationLayout());
+      this.stageResizeObserver.observe(this.mount.querySelector('.video-stage'));
+    } else this.listen(window, 'resize', () => this.syncRotationLayout());
 
     if (!document.pictureInPictureEnabled || !this.video.requestPictureInPicture) this.pipButton.hidden = true;
     this.setupMediaSession();
@@ -880,6 +890,39 @@ class MergedPlayer {
     } catch (_) {}
   }
 
+  restoreRotation() {
+    let rotation = 0;
+    try { rotation = Number(localStorage.getItem(`${this.sessionKey}:rotation`)) || 0; } catch (_) {}
+    this.rotation = [0, 90, 180, 270].includes(rotation) ? rotation : 0;
+    this.syncRotationLayout();
+  }
+
+  rotateVideo() {
+    this.rotation = (this.rotation + 90) % 360;
+    try { localStorage.setItem(`${this.sessionKey}:rotation`, String(this.rotation)); } catch (_) {}
+    this.syncRotationLayout();
+    this.showToast(this.rotation ? `已旋转 ${this.rotation}°` : '已恢复原方向');
+  }
+
+  syncRotationLayout() {
+    if (!this.root) return;
+    const sideways = this.rotation === 90 || this.rotation === 270;
+    const stage = this.mount.querySelector('.video-stage');
+    this.root.style.setProperty('--video-rotation', `${this.rotation || 0}deg`);
+    this.root.classList.toggle('is-sideways', sideways);
+    if (sideways && stage) {
+      const bounds = stage.getBoundingClientRect();
+      this.root.style.setProperty('--rotated-video-width', `${bounds.height}px`);
+      this.root.style.setProperty('--rotated-video-height', `${bounds.width}px`);
+    } else {
+      this.root.style.removeProperty('--rotated-video-width');
+      this.root.style.removeProperty('--rotated-video-height');
+    }
+    const nextRotation = (this.rotation + 90) % 360;
+    this.rotateButton?.setAttribute('aria-label', `顺时针旋转 90 度（当前 ${this.rotation || 0} 度）`);
+    this.rotateButton?.setAttribute('title', `旋转到 ${nextRotation}°（R）`);
+  }
+
   readSavedPosition() {
     try {
       const saved = Number(localStorage.getItem(this.sessionKey));
@@ -945,6 +988,7 @@ class MergedPlayer {
       ArrowUp: () => this.setVolume(this.video.volume + .05),
       ArrowDown: () => this.setVolume(this.video.volume - .05),
       m: () => { this.video.muted = !this.video.muted; this.persistPreferences(); this.syncVolume(); },
+      r: () => this.rotateVideo(),
       f: () => this.toggleFullscreen(),
       p: () => this.togglePictureInPicture()
     };
@@ -974,6 +1018,7 @@ class MergedPlayer {
     this.fullscreenButton.innerHTML = fullscreen ? playerIcons.fullscreenExit : playerIcons.fullscreen;
     this.fullscreenButton.setAttribute('aria-label', fullscreen ? '退出全屏' : '全屏');
     this.root.classList.toggle('is-fullscreen', fullscreen);
+    requestAnimationFrame(() => this.syncRotationLayout());
     this.showControls();
   }
 
@@ -1021,6 +1066,7 @@ class MergedPlayer {
     clearTimeout(this.controlsTimer);
     clearTimeout(this.singleClickTimer);
     clearTimeout(this.longPressTimer);
+    this.stageResizeObserver?.disconnect();
     this.listeners.splice(0).forEach(remove => remove());
     if ('mediaSession' in navigator) {
       for (const action of ['play', 'pause', 'seekbackward', 'seekforward', 'seekto']) {

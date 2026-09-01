@@ -87,6 +87,6 @@ The uploader automatically parses file names to generate clean Telegram captions
 
 ## Web recording player
 
-The bundled player supports continuous multi-part playback, precise seeking, buffering and error recovery, 10-second skips, 0.5–3x speed, remembered volume, picture-in-picture, fullscreen toggling, desktop shortcuts, mobile double-tap seeking, and press-and-hold acceleration.
+The bundled player supports continuous multi-part playback, precise seeking, buffering and error recovery, 10-second skips, 0.5–3x speed, remembered volume, 90-degree rotation, picture-in-picture, fullscreen toggling, desktop shortcuts, mobile double-tap seeking, and press-and-hold acceleration.
 
 Media ranges are cached in `./cache` to avoid repeatedly fetching the same bytes from Telegram. The cache defaults to 2GB and removes blocks that have not been used for 24 hours; tune it with `MEDIA_CACHE_MAX_MB` and `MEDIA_CACHE_MAX_AGE`.

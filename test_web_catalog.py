@@ -23,6 +23,15 @@ class CatalogParsingTests(unittest.TestCase):
         part = parse_recording("/downloads/抖音直播/小萝卜/2025-04-15/小萝卜.mp4", 44)
         self.assertEqual((part.streamer, part.date, part.time), ("小萝卜", "2025-04-15", "00:00:00"))
 
+    def test_nonstandard_name_uses_parent_and_upload_date(self):
+        part = parse_recording(
+            "/downloads/manual/某主播/随手改过的标题.mp4",
+            45,
+            "2026-08-31 12:34:56",
+        )
+        self.assertEqual((part.streamer, part.date, part.time), ("某主播", "2026-08-31", "00:00:00"))
+        self.assertEqual(part.part_order, ())
+
 
 class HttpRangeTests(unittest.TestCase):
     def test_open_ended_range(self):

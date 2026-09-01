@@ -157,18 +157,16 @@ function renderHome() {
   const sessions = state.streamers.reduce((total, item) => total + item.session_count, 0);
   app.innerHTML = `<section class="page home-page">
     <div class="hero">
-      <span class="eyebrow"><i></i> 直播影像馆</span>
-      <h1>让每一场直播，<br><span>值得重看。</span></h1>
-      <p>安静地收藏每个瞬间。快速找到主播、日期与场次，然后把注意力留给内容。</p>
-      <div class="hero-stats"><span><strong>${state.streamers.length}</strong> 位主播</span><i></i><span><strong>${sessions.toLocaleString()}</strong> 场直播</span><i></i><span>持续更新</span></div>
+      <h1>直播回放</h1>
+      <div class="hero-stats"><span><strong>${state.streamers.length}</strong> 位主播</span><i></i><span><strong>${sessions.toLocaleString()}</strong> 场直播</span></div>
     </div>
-    <div class="section-head showcase-head"><div><span class="section-kicker">Recently updated</span><h2>最近更新</h2></div><a class="all-streamers-link" href="/streamers" data-link>全部主播 <span>›</span></a></div>
+    <div class="section-head showcase-head"><h2>最近更新</h2><a class="all-streamers-link" href="/streamers" data-link>全部主播 <span>›</span></a></div>
     <div class="featured-grid showcase-grid">${featured.map((item, index) => `<button class="feature-card showcase-${index + 1}" type="button" data-open-channel="${escapeHtml(item.name)}">
       ${coverMarkup(item.cover_message_id, index ? 'lazy' : 'eager')}<span class="image-shade"></span>
-      <span class="feature-copy"><small>${index ? '刚刚更新' : '最新归档'}</small><strong>${escapeHtml(item.name)}</strong><em>${item.session_count} 场回放 · 更新于${escapeHtml(relativeDate(item.latest_date))}</em></span>
+      <span class="feature-copy"><strong>${escapeHtml(item.name)}</strong><em>${item.session_count} 场回放 · 更新于${escapeHtml(relativeDate(item.latest_date))}</em></span>
       ${index ? '' : '<span class="feature-arrow">↗</span>'}
     </button>`).join('')}</div>
-    <section class="home-favorites" id="favorites"><div class="section-head"><div><span class="section-kicker">Your collection</span><h2>我的收藏</h2></div>${favorites.length ? '<a class="all-streamers-link" href="/favorites" data-link>查看全部 <span>›</span></a>' : ''}</div>
+    <section class="home-favorites" id="favorites"><div class="section-head"><h2>我的收藏</h2>${favorites.length ? '<a class="all-streamers-link" href="/favorites" data-link>查看全部 <span>›</span></a>' : ''}</div>
       ${favorites.length ? `<div class="favorite-grid">${favorites.map(favoriteCardMarkup).join('')}</div>` : '<div class="favorite-empty"><span>☆</span><div><strong>收藏喜欢的录像</strong><p>播放时点亮星标，录像会出现在这里，仅保存在当前浏览器。</p></div></div>'}
     </section>
   </section>`;
@@ -176,8 +174,8 @@ function renderHome() {
 
 function renderFavorites() {
   const favorites = loadFavorites();
-  app.innerHTML = `<section class="page favorites-page"><a class="text-back" href="/" data-link><span>‹</span> 返回首页</a><header class="directory-head"><div><span class="section-kicker">Your collection</span><h1>我的收藏</h1><p>${favorites.length ? `已收藏 ${favorites.length} 场录像。` : '还没有收藏任何录像。'}</p></div></header>
-    ${favorites.length ? `<div class="favorite-grid favorite-grid-full">${favorites.map(favoriteCardMarkup).join('')}</div>` : '<div class="favorite-empty large"><span>☆</span><div><strong>这里还很安静</strong><p>在播放页点击“收藏”后，就能从任何页面快速回来。</p></div></div>'}
+  app.innerHTML = `<section class="page favorites-page"><a class="text-back" href="/" data-link><span>‹</span> 返回首页</a><header class="directory-head"><div><h1>我的收藏</h1><p>${favorites.length ? `已收藏 ${favorites.length} 场录像。` : '还没有收藏任何录像。'}</p></div></header>
+    ${favorites.length ? `<div class="favorite-grid favorite-grid-full">${favorites.map(favoriteCardMarkup).join('')}</div>` : '<div class="favorite-empty large"><span>☆</span><div><strong>还没有收藏</strong><p>在播放页点击“收藏”即可添加。</p></div></div>'}
   </section>`;
 }
 
@@ -218,11 +216,11 @@ function renderDirectory() {
   state.sort = sort; state.query = query;
   globalSearchInput.value = query;
   app.innerHTML = `<section class="page directory-page">
-    <a class="text-back" href="/" data-link><span>‹</span> 返回精选首页</a>
-    <header class="directory-head"><div><span class="section-kicker">Streamer directory</span><h1>主播目录</h1><p>从 ${state.streamers.length} 位主播中，找到你想看的那一位。</p></div></header>
+    <a class="text-back" href="/" data-link><span>‹</span> 返回首页</a>
+    <header class="directory-head"><h1>主播目录</h1></header>
     <div class="directory-toolbar"><form class="directory-search" role="search"><svg viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.5"/><path d="m16 16 4 4"/></svg><input type="search" value="${escapeHtml(query)}" placeholder="输入主播名称" aria-label="输入主播名称"><button type="submit">搜索</button></form>
       <div class="directory-sort"><span>排序</span><a class="${sort === 'recent' ? 'active' : ''}" href="${directoryUrl(1, 'recent', query)}" data-link>最近更新</a><a class="${sort === 'name' ? 'active' : ''}" href="${directoryUrl(1, 'name', query)}" data-link>名称</a><a class="${sort === 'most' ? 'active' : ''}" href="${directoryUrl(1, 'most', query)}" data-link>录像最多</a></div></div>
-    <div class="directory-summary"><span>${query ? `“${escapeHtml(query)}”找到 ${items.length} 位主播` : `第 ${page} / ${totalPages} 页`}</span><small>每页最多 ${DIRECTORY_PAGE_SIZE} 位，只加载当前页封面</small></div>
+    <div class="directory-summary"><span>${query ? `“${escapeHtml(query)}”找到 ${items.length} 位主播` : `第 ${page} / ${totalPages} 页`}</span></div>
     <div class="streamer-grid">${visible.length ? visible.map(item => `<button class="streamer-card" type="button" data-open-channel="${escapeHtml(item.name)}">
     <span class="streamer-cover">${coverMarkup(item.cover_message_id)}</span>
     <span class="streamer-info"><span><strong>${escapeHtml(item.name)}</strong><small>更新于${escapeHtml(relativeDate(item.latest_date))} · ${item.session_count} 场</small></span><i>›</i></span>
@@ -248,7 +246,7 @@ async function renderChannel(channel, routeId) {
     </div>
     ${dates.length ? `<nav class="month-rail" aria-label="选择月份">${[...grouped].map(([month], index) => `<button type="button" class="${index ? '' : 'active'}" data-jump-month="${month}">${month.replace('-', ' 年 ')} 月</button>`).join('')}</nav>
       <div class="date-sections">${[...grouped].map(([month, items]) => { const [year, monthNumber] = month.split('-'); return `<section class="month-section" data-month-section="${month}">
-        <div class="month-heading"><div><span class="section-kicker">${new Intl.DateTimeFormat('en', { month: 'long' }).format(new Date(`${month}-01T00:00:00`))}</span><h2>${year} 年 ${Number(monthNumber)} 月</h2></div><span>${items.length} 个录像日</span></div>
+        <div class="month-heading"><h2>${year} 年 ${Number(monthNumber)} 月</h2><span>${items.length} 个录像日</span></div>
         <div class="date-grid">${items.map(item => { const date = new Date(`${item.date}T00:00:00`); return `<a class="date-card" href="${watchPath(channel, item.date)}" data-link><span class="date-cover">${coverMarkup(item.cover_message_id)}<i aria-hidden="true">▶</i></span><span class="date-day">${date.getDate()}</span><span class="date-copy"><strong>${new Intl.DateTimeFormat('zh-CN', { weekday: 'long' }).format(date)}</strong><small>${item.session_count} 场 · ${item.part_count} 个录像片段</small></span><i>›</i></a>`; }).join('')}</div>
       </section>`; }).join('')}</div>` : '<div class="no-results">这个主播还没有录像</div>'}
   </section>`;
@@ -294,7 +292,7 @@ async function renderDateLibrary(channel, routeId) {
   const allMonths = [...grouped].flatMap(([, months]) => [...months.keys()]);
   app.innerHTML = `<section class="page date-library-page">
     <a class="text-back" href="${from ? watchPath(channel, from) : channelPath(channel)}" data-link><span>‹</span> ${from ? '返回播放' : channel}</a>
-    <header class="date-library-head"><span class="section-kicker">Recording timeline</span><h1>${escapeHtml(channel)}的全部录像日</h1><p>${dates.length} 个录像日，按年份和月份快速定位。</p></header>
+    <header class="date-library-head"><h1>${escapeHtml(channel)}的全部录像日</h1></header>
     <nav class="library-year-rail">${allMonths.map((month, index) => `<button type="button" class="${month === from?.slice(0, 7) || (!from && !index) ? 'active' : ''}" data-library-month="${month}">${month.replace('-', ' / ')}</button>`).join('')}</nav>
     <div class="library-years">${[...grouped].map(([year, months]) => `<section class="library-year"><h2>${year}</h2>${[...months].map(([month, items]) => `<div class="library-month" data-library-month-section="${month}"><h3>${Number(month.slice(5))} 月 <small>${items.length} 天</small></h3><div class="library-date-grid">${items.map(item => `<a class="library-date ${item.date === from ? 'selected' : ''}" href="${watchPath(channel, item.date)}" data-link><strong>${Number(item.date.slice(8))}</strong><span>${new Intl.DateTimeFormat('zh-CN', { weekday: 'short' }).format(new Date(`${item.date}T00:00:00`))}<small>${item.session_count} 场</small></span><i>›</i></a>`).join('')}</div></div>`).join('')}</section>`).join('')}</div>
   </section>`;
@@ -311,12 +309,12 @@ async function renderWatch(channel, date, routeId) {
   const requestedMessageId = Number(new URLSearchParams(location.search).get('session'));
   const initialSessionIndex = Math.max(0, sessions.findIndex(session => session.parts.some(part => part.message_id === requestedMessageId)));
   app.innerHTML = `<section class="page watch-page">
-    <div class="watch-heading"><a class="text-back" href="${channelPath(channel)}" data-link><span>‹</span> ${escapeHtml(channel)}</a><span class="source-badge"><i></i> 原始录像</span></div>
+    <div class="watch-heading"><a class="text-back" href="${channelPath(channel)}" data-link><span>‹</span> ${escapeHtml(channel)}</a></div>
     <div class="watch-grid"><div class="watch-main">
       <div id="playerMount" class="player-mount"></div>
-      <div class="now-playing"><div><span class="section-kicker">录像回放</span><h1>${escapeHtml(channel)}的直播回放</h1><p>${escapeHtml(longDate(date))}<span class="playing-meta"></span></p></div><div class="now-actions"><button class="favorite-button" type="button" data-toggle-favorite><span>☆</span> 收藏</button><button class="soft-button" type="button" data-copy-link>复制链接</button></div></div>
+      <div class="now-playing"><div><h1>${escapeHtml(channel)}的直播回放</h1><p>${escapeHtml(longDate(date))}<span class="playing-meta"></span></p></div><div class="now-actions"><button class="favorite-button" type="button" data-toggle-favorite><span>☆</span> 收藏</button><button class="soft-button" type="button" data-copy-link>复制链接</button></div></div>
     </div><aside class="recording-nav">
-      <div class="rail-panel sessions-panel"><div class="nav-head"><span class="section-kicker">录像导航</span><strong>${escapeHtml(channel)}</strong></div>
+      <div class="rail-panel sessions-panel"><div class="nav-head"><strong>${escapeHtml(channel)}</strong></div>
         <div class="date-launcher static"><span><small>当前录像日期 · 共 ${dates.length} 天</small><strong>${escapeHtml(longDate(date))}</strong></span></div>
         <div class="sessions-head"><span>当天场次</span><small>${sessions.length} 场</small></div><div class="session-stack">${sessions.map(sessionMarkup).join('') || '<div class="no-results">没有场次</div>'}</div>
         <div class="adjacent-row"><button type="button" data-adjacent-date="${older?.date || ''}" ${older ? '' : 'disabled'}>‹ ${older ? `较早 ${shortDate(older.date)}` : '已经最早'}</button><button type="button" data-adjacent-date="${newer?.date || ''}" ${newer ? '' : 'disabled'}>${newer ? `较新 ${shortDate(newer.date)}` : '已经最新'} ›</button></div>
@@ -454,7 +452,7 @@ async function route() {
     if (routeId !== state.routeId) return;
     if (!parts.length) {
       state.channel = ''; state.date = ''; state.currentDates = []; state.activeFavorite = null;
-      setActiveNav('home'); setCrumbs([]); document.title = 'Replay · 直播影像馆'; renderHome();
+      setActiveNav('home'); setCrumbs([]); document.title = 'Replay · 直播回放'; renderHome();
     } else if (parts[0] === 'streamers') {
       state.channel = ''; state.date = ''; state.currentDates = []; state.activeFavorite = null;
       setActiveNav('streamers'); setCrumbs([{ label: '主播目录', href: '/streamers' }]); document.title = '主播目录 · Replay'; renderDirectory();
