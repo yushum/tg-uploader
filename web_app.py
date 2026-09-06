@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import random
+import re
 import sqlite3
 import time
 import uuid
@@ -341,24 +342,36 @@ async def live_stop():
     return {"ok": True}
 
 
+MAX_LIVE_CANDIDATES = 10000
+
+
 @app.get("/api/live/candidates")
 async def live_candidates(
-    streamer: str = Query(min_length=1),
-    from_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    to_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    streamer: list[str] = Query(default=[]),
+    from_date: str = "",
+    to_date: str = "",
+    exclude: list[str] = Query(default=[]),
 ):
-    """按主播+日期范围一次列出可推流录像（含时长与是否仍可播）。"""
+    """按主播（多选，为空=全部）+日期范围（为空=不限）+排除日期，一次列出可推流录像。"""
+    names = {name.strip() for chunk in streamer for name in chunk.split(",") if name.strip()}
+    excluded = {day.strip() for chunk in exclude for day in chunk.replace("，", ",").split(",") if day.strip()}
+    for value in (from_date, to_date, *excluded):
+        if value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise HTTPException(status_code=400, detail=f"日期格式错误: {value}")
     parts = sorted(
         [part for part in _catalog()
-         if part.streamer == streamer and from_date <= part.date <= to_date],
+         if (not names or part.streamer in names)
+         and (not from_date or part.date >= from_date)
+         and (not to_date or part.date <= to_date)
+         and part.date not in excluded],
         key=lambda part: (part.date, part.time, part.message_id),
-    )
+    )[:MAX_LIVE_CANDIDATES]
     details_by_id: dict[int, dict] = {}
     if parts and telegram is not None:
         ids = [part.message_id for part in parts]
         try:
-            for offset in range(0, len(ids), 100):
-                messages = await telegram.get_messages(CHANNEL_ID, ids=ids[offset:offset + 100])
+            for offset in range(0, len(ids), 200):
+                messages = await telegram.get_messages(CHANNEL_ID, ids=ids[offset:offset + 200])
                 if not isinstance(messages, list):
                     messages = [messages]
                 for message in messages:
