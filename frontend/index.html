@@ -51,6 +51,14 @@
   <main id="app"><div class="initial-loading"><i></i><span>正在加载录像…</span></div></main>
 
   <div class="toast" role="status" aria-live="polite"></div>
+  <div class="live-dock" id="liveDock">
+    <label class="live-check-all"><input type="checkbox" id="liveCheckAll"> 全选本页</label>
+    <button type="button" id="liveSelectRange" title="按主播+日期范围选择">范围全选</button>
+    <input id="liveChannel" placeholder="目标频道 @my_channel" aria-label="目标频道">
+    <button type="button" id="liveStartBtn" class="live-start">开始推流</button>
+    <button type="button" id="liveStopBtn" class="live-stop">停止</button>
+    <span id="liveStatus" class="live-status">空闲</span>
+  </div>
   <script src="/static/app.js?v=20260901-rotate-player"></script>
   <script type="module" src="/app.js?v=8"></script>
   <script>

@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from telethon import TelegramClient
+from telethon.tl import functions
 from telethon.tl.types import DocumentAttributeVideo
 
 from web_catalog import group_sessions, load_recordings, parse_http_range
@@ -150,6 +151,187 @@ class FavoriteItem(BaseModel):
 
 class BatchFavoritesItem(BaseModel):
     items: list[FavoriteItem]
+
+
+class LiveStartRequest(BaseModel):
+    channel: str
+    message_ids: list[int]
+
+
+live_state = {
+    "status": "IDLE",  # IDLE / STREAMING
+    "channel": "",
+    "rtmp": "",
+    "message_ids": [],
+    "index": 0,
+    "current_message_id": None,
+    "current_label": "",
+    "error": "",
+}
+live_task: asyncio.Task | None = None
+live_process: asyncio.subprocess.Process | None = None
+live_stop_event = asyncio.Event()
+
+
+def _live_label(message_id: int) -> str:
+    """从录像目录解析 message_id 对应的『主播 日期 时间 场次』描述。"""
+    try:
+        for part in _catalog():
+            if part.message_id == message_id:
+                return f"{part.streamer} {part.date} {part.time[:5]} {part.part_label}"
+    except Exception:
+        pass
+    return f"id={message_id}"
+
+
+async def _ensure_group_call_live(channel_peer) -> None:
+    """在目标频道开播（已开播则忽略异常），需要管理视频聊天权限。"""
+    try:
+        await telegram(functions.phone.CreateGroupCallRequest(
+            peer=channel_peer, rtmp_stream=True, random_id=telegram._get_random_id() if hasattr(telegram, "_get_random_id") else 123456,
+        ))
+    except Exception as exc:
+        msg = str(exc)
+        # 已有直播 / 已在进行中则视为成功
+        if "GROUPCALL_ALREADY" in msg or "ALREADY" in msg.upper() or "ANONYM" in msg.upper():
+            logger.info("Group call already active, continue: %s", exc)
+            return
+        # Telethon 常见错误名兜底：仍尝试继续获取 RTMP
+        logger.warning("CreateGroupCall result: %s", exc)
+
+
+async def _get_rtmp_url(channel_peer) -> str:
+    result = await telegram(functions.phone.GetGroupCallStreamRtmpUrlRequest(peer=channel_peer, revoke=False))
+    url = getattr(result, "url", "") or ""
+    key = getattr(result, "key", "") or ""
+    if not url:
+        raise RuntimeError("Telegram 未返回 RTMP 地址（请确认账号拥有管理视频聊天权限）")
+    return f"{url.rstrip('/')}/{key}" if key else url
+
+
+async def _live_worker(channel: str, message_ids: list[int]) -> None:
+    global live_process
+    live_stop_event.clear()
+    try:
+        entity = await telegram.get_entity(channel)
+    except Exception as exc:
+        live_state.update(status="IDLE", error=f"目标频道无效: {exc}")
+        return
+    try:
+        await _ensure_group_call_live(entity)
+        rtmp = await _get_rtmp_url(entity)
+    except Exception as exc:
+        logger.error("RTMP setup failed: %s", exc)
+        live_state.update(status="IDLE", error=str(exc))
+        return
+    live_state.update(rtmp=rtmp, status="STREAMING", error="")
+    logger.info("Live streaming to %s (%d videos)", channel, len(message_ids))
+    for position, message_id in enumerate(message_ids):
+        if live_stop_event.is_set():
+            break
+        live_state.update(index=position + 1, current_message_id=message_id,
+                           current_label=_live_label(message_id))
+        try:
+            message = await telegram.get_messages(CHANNEL_ID, ids=message_id)
+            if not message or not getattr(message, "document", None):
+                logger.warning("Skip missing message %s", message_id)
+                continue
+            live_process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "warning", "-re",
+                "-i", "pipe:0",
+                "-c:v", "copy", "-c:a", "aac",
+                "-f", "flv", "-flvflags", "no_duration_filesize",
+                rtmp,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            logger.error("ffmpeg spawn failed: %s", exc)
+            live_state.update(error=str(exc))
+            continue
+        try:
+            async for chunk in telegram.iter_download(message.document, chunk_size=512 * 1024):
+                if live_stop_event.is_set():
+                    break
+                if live_process.stdin is None or live_process.stdin.is_closing():
+                    break
+                try:
+                    live_process.stdin.write(bytes(chunk))
+                    await live_process.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+            try:
+                if live_process.stdin and not live_process.stdin.is_closing():
+                    live_process.stdin.close()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(live_process.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                live_process.kill()
+        except Exception as exc:
+            logger.error("Stream video %s failed: %s", message_id, exc)
+            try:
+                live_process.kill()
+            except Exception:
+                pass
+        finally:
+            live_process = None
+    live_state.update(status="IDLE", current_message_id=None, current_label="")
+    logger.info("Live worker finished")
+
+
+@app.post("/api/live/start")
+async def live_start(body: LiveStartRequest):
+    global live_task
+    channel = (body.channel or "").strip()
+    if not channel:
+        raise HTTPException(status_code=400, detail="请填写目标频道")
+    if not body.message_ids:
+        raise HTTPException(status_code=400, detail="请至少勾选一个录像")
+    if telegram is None:
+        raise HTTPException(status_code=503, detail="Telegram 尚未连接")
+    if live_state["status"] == "STREAMING":
+        raise HTTPException(status_code=409, detail="已有推流任务，请先停止")
+    message_ids = [int(m) for m in body.message_ids]
+    live_state.update(status="STREAMING", channel=channel, message_ids=message_ids, index=0,
+                        current_message_id=message_ids[0], error="")
+    live_task = asyncio.create_task(_live_worker(channel, message_ids))
+    return {"ok": True, "channel": channel, "count": len(message_ids)}
+
+
+@app.post("/api/live/stop")
+async def live_stop():
+    global live_task, live_process
+    live_stop_event.set()
+    if live_process is not None:
+        try:
+            live_process.kill()
+        except Exception:
+            pass
+    if live_task is not None:
+        live_task.cancel()
+        try:
+            await live_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        live_task = None
+    live_state.update(status="IDLE", current_message_id=None, current_label="")
+    return {"ok": True}
+
+
+@app.get("/api/live/status")
+async def live_status():
+    return {
+        "status": live_state["status"],
+        "channel": live_state["channel"],
+        "current_message_id": live_state["current_message_id"],
+        "current": live_state["current_label"],
+        "total": len(live_state["message_ids"]),
+        "index": live_state["index"],
+        "error": live_state["error"],
+    }
 
 
 def _video_details(message):
