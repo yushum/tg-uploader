@@ -373,9 +373,9 @@ class LivePlayModeTests(unittest.IsolatedAsyncioTestCase):
             await web_app._live_worker("@c", [7], "once")
         self.assertEqual(len(spawned), 1)
         args, picture = spawned[0]
-        self.assertIn("-vf", args)
+        self.assertIn("-filter_complex", args)
         self.assertIn("libx264", args)
-        self.assertTrue(any("pad=1920:1080" in x for x in args))
+        self.assertTrue(any("overlay=" in x and "gblur=" in x for x in args))
         self.assertNotIn("copy", args[args.index("-c:v") + 1:args.index("-c:v") + 2])
         self.assertEqual(picture, "transcode")
 
@@ -401,6 +401,7 @@ class LivePlayModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(spawned), 1)
         args, picture = spawned[0]
         self.assertNotIn("-vf", args)
+        self.assertNotIn("-filter_complex", args)
         self.assertIn("-c:v", args)
         self.assertEqual(args[args.index("-c:v") + 1], "copy")
         self.assertEqual(picture, "copy")
@@ -429,14 +430,16 @@ class LivePictureTests(unittest.TestCase):
     def test_portrait_pillarboxes_without_stretch(self):
         vf, note = web_app._live_picture_plan(
             {"codec": "h264", "width": 1088, "height": 1920, "sar": 1.0, "rotation": 0})
-        self.assertIn("pad=1920:1080", vf)
+        self.assertIn("overlay=(W-w)/2:(H-h)/2", vf)
+        self.assertIn("gblur=", vf)
+        self.assertNotIn("color=black", vf)
         self.assertIn("setsar=1", vf)
         self.assertIn("非16:9", note)
 
     def test_rotated_landscape_counts_as_portrait(self):
         vf, note = web_app._live_picture_plan(
             {"codec": "h264", "width": 1920, "height": 1080, "sar": 1.0, "rotation": 90})
-        self.assertIn("pad=1920:1080", vf)
+        self.assertIn("overlay=", vf)
         self.assertIn("旋转", note)
 
     def test_non_h264_and_sar_transcode(self):

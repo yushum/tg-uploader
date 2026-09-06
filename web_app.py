@@ -354,13 +354,20 @@ def _live_picture_plan(info):
              and abs(dar - 16 / 9) / (16 / 9) < 0.02)
     if clean:
         return None, "原画直推"
-    parts = []
+    # 背景用同一画面放大裁剪+重度虚化代替纯黑边，前景保持比例居中。虚化在
+    # 缩略图上做完再放大，回放成本可忽略，主体编码开销与纯黑边垫播相当。
+    head = []
     if abs(sar - 1.0) >= 0.01:
-        parts.append(f"scale=iw*{sar:.4f}:ih")
-    parts.append("scale=1920:1080:force_original_aspect_ratio=decrease")
-    parts.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
-    parts.append("pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black")
-    parts.append("setsar=1")
+        head.append(f"scale=iw*{sar:.4f}:ih")
+    base = ",".join(head) + "," if head else ""
+    vf = (
+        f"{base}split=2[bg][fg];"
+        "[bg]scale=1920:1080:force_original_aspect_ratio=increase,"
+        "crop=1920:1080,scale=160:90,gblur=sigma=30,scale=1920:1080[bg];"
+        "[fg]scale=1920:1080:force_original_aspect_ratio=decrease,"
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2[fg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
+    )
     reasons = []
     if info.get("codec") != "h264":
         reasons.append(info.get("codec") or "未知编码")
@@ -370,7 +377,7 @@ def _live_picture_plan(info):
         reasons.append(f"{width}x{height}非16:9")
     if abs(sar - 1.0) >= 0.01:
         reasons.append("像素非正方形")
-    return ",".join(parts), "适配转码(" + "、".join(reasons) + ")"
+    return vf, "适配转码(" + "、".join(reasons) + ")"
 
 
 async def _track_ffmpeg_progress(proc, progress: dict) -> None:
@@ -491,7 +498,7 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
                 live_state.update(picture=picture)
                 logger.info("Stream video %s: %s", message_id, picture_note)
                 video_args = ["-c:v", "copy"] if vf is None else [
-                    "-vf", vf, "-c:v", "libx264", "-preset", "veryfast",
+                    "-filter_complex", vf, "-c:v", "libx264", "-preset", "veryfast",
                     "-tune", "zerolatency", "-crf", "23", "-g", "60",
                 ]
                 live_process = await asyncio.create_subprocess_exec(
