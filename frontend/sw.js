@@ -1,7 +1,7 @@
 /* Replay PWA service worker.
  * 只缓存 App 壳子（HTML/JS/CSS/图标），/api/*（含录像 Range 分片流）永远直通网络，绝不缓存。
  */
-const SHELL_CACHE = 'replay-shell-v1';
+const SHELL_CACHE = 'replay-shell-v2';
 // 壳子文件增长封顶：发版时 ?v= 变化会产生新条目，超量时按插入顺序淘汰最旧的。
 const MAX_SHELL_ENTRIES = 60;
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeVideo
 
@@ -96,6 +97,7 @@ async def lifespan(_app: FastAPI):
     await telegram.connect()
     if not await telegram.is_user_authorized():
         raise RuntimeError("The cloned Telegram web session is not authorized")
+    _init_favorites_db()
     logger.info("Telegram streaming client connected")
     try:
         yield
@@ -119,6 +121,35 @@ def _catalog():
     except sqlite3.Error as exc:
         logger.error("Could not read uploader database: %s", exc)
         raise HTTPException(status_code=503, detail="录像目录暂时不可用") from exc
+
+
+def _init_favorites_db():
+    try:
+        Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS favorites (
+                    message_id INTEGER PRIMARY KEY,
+                    channel TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    time TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+    except sqlite3.Error as exc:
+        logger.error("Could not initialize favorites table: %s", exc)
+
+
+class FavoriteItem(BaseModel):
+    message_id: int
+    channel: str
+    date: str
+    time: str = ""
+
+
+class BatchFavoritesItem(BaseModel):
+    items: list[FavoriteItem]
 
 
 def _video_details(message):
@@ -314,6 +345,89 @@ async def sessions(streamer: str = Query(min_length=1), date: str = Query(patter
             }
         )
     return result
+
+
+@app.get("/api/favorites")
+async def get_favorites():
+    _init_favorites_db()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT message_id, channel, date, time, created_at FROM favorites ORDER BY created_at DESC, message_id DESC"
+            ).fetchall()
+            return [
+                {
+                    "message_id": row["message_id"],
+                    "channel": row["channel"],
+                    "date": row["date"],
+                    "time": row["time"] or "",
+                    "created_at": row["created_at"] or "",
+                }
+                for row in rows
+            ]
+    except sqlite3.Error as exc:
+        logger.error("Could not read favorites: %s", exc)
+        raise HTTPException(status_code=500, detail="读取收藏失败") from exc
+
+
+@app.post("/api/favorites")
+async def save_favorite(item: FavoriteItem):
+    _init_favorites_db()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO favorites (message_id, channel, date, time)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    channel = excluded.channel,
+                    date = excluded.date,
+                    time = excluded.time
+                """,
+                (item.message_id, item.channel, item.date, item.time),
+            )
+            conn.commit()
+            return {"ok": True, "message_id": item.message_id}
+    except sqlite3.Error as exc:
+        logger.error("Could not save favorite: %s", exc)
+        raise HTTPException(status_code=500, detail="保存收藏失败") from exc
+
+
+@app.post("/api/favorites/batch")
+async def batch_save_favorites(batch: BatchFavoritesItem):
+    _init_favorites_db()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.executemany(
+                """
+                INSERT INTO favorites (message_id, channel, date, time)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    channel = excluded.channel,
+                    date = excluded.date,
+                    time = excluded.time
+                """,
+                [(item.message_id, item.channel, item.date, item.time) for item in batch.items],
+            )
+            conn.commit()
+            return {"ok": True, "count": len(batch.items)}
+    except sqlite3.Error as exc:
+        logger.error("Could not batch save favorites: %s", exc)
+        raise HTTPException(status_code=500, detail="批量保存收藏失败") from exc
+
+
+@app.delete("/api/favorites/{message_id}")
+async def delete_favorite(message_id: int):
+    _init_favorites_db()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM favorites WHERE message_id = ?", (message_id,))
+            conn.commit()
+            return {"ok": True, "message_id": message_id}
+    except sqlite3.Error as exc:
+        logger.error("Could not delete favorite: %s", exc)
+        raise HTTPException(status_code=500, detail="取消收藏失败") from exc
 
 
 def _media_cache_path(message_id: int, file_size: int, block_index: int) -> Path:

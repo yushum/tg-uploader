@@ -128,6 +128,59 @@ function saveFavorites(items) {
   localStorage.setItem(FAVORITES_KEY, JSON.stringify(items));
 }
 
+let syncFavoritesPromise = null;
+async function syncRemoteFavorites() {
+  if (syncFavoritesPromise) return syncFavoritesPromise;
+  syncFavoritesPromise = (async () => {
+    try {
+      const local = loadFavorites();
+      // 先向服务端读取所有收藏
+      const remote = await api('/api/favorites');
+      const remoteMap = new Map(remote.map(item => [Number(item.message_id), item]));
+      const localMap = new Map(local.map(item => [Number(item.message_id), item]));
+
+      // 检查是否有本地独有而服务端尚无的条目（例如用户在升级前的本地收藏，进行自动合并上报）
+      const missingOnRemote = local.filter(item => !remoteMap.has(Number(item.message_id)));
+      if (missingOnRemote.length > 0) {
+        fetch('/api/favorites/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: missingOnRemote.map(item => ({
+            message_id: Number(item.message_id),
+            channel: item.channel,
+            date: item.date,
+            time: item.time || '',
+          })) }),
+        }).catch(() => {});
+      }
+
+      // 合并本地与服务端：以服务端最新为主，并补全本地新增
+      const mergedMap = new Map([...localMap, ...remoteMap]);
+      const merged = Array.from(mergedMap.values());
+      saveFavorites(merged);
+
+      // 如果当前页面就在首页或收藏页，静默刷新收藏区域
+      if (location.pathname === '/' || location.pathname === '/favorites') {
+        const favorites = loadFavorites();
+        const fullGrid = document.querySelector('.favorite-grid-full');
+        const homeFavSection = document.querySelector('.home-favorites');
+        if (location.pathname === '/favorites' && fullGrid) {
+          renderFavorites();
+        } else if (location.pathname === '/' && homeFavSection) {
+          const grid = homeFavSection.querySelector('.favorite-grid');
+          if (grid) grid.innerHTML = favorites.slice(0, 4).map(favoriteCardMarkup).join('');
+        }
+      }
+      syncFavoriteButton();
+    } catch (_) {
+      // 离线或网络异常时优雅降级，使用本地缓存
+    } finally {
+      syncFavoritesPromise = null;
+    }
+  })();
+  return syncFavoritesPromise;
+}
+
 function isFavorite(messageId) {
   return loadFavorites().some(item => Number(item.message_id) === Number(messageId));
 }
@@ -167,7 +220,7 @@ function renderHome() {
       ${index ? '' : '<span class="feature-arrow">↗</span>'}
     </button>`).join('')}</div>
     <section class="home-favorites" id="favorites"><div class="section-head"><h2>我的收藏</h2>${favorites.length ? '<a class="all-streamers-link" href="/favorites" data-link>查看全部 <span>›</span></a>' : ''}</div>
-      ${favorites.length ? `<div class="favorite-grid">${favorites.map(favoriteCardMarkup).join('')}</div>` : '<div class="favorite-empty"><span>☆</span><div><strong>收藏喜欢的录像</strong><p>播放时点亮星标，录像会出现在这里，仅保存在当前浏览器。</p></div></div>'}
+      ${favorites.length ? `<div class="favorite-grid">${favorites.map(favoriteCardMarkup).join('')}</div>` : '<div class="favorite-empty"><span>☆</span><div><strong>收藏喜欢的录像</strong><p>播放时点亮星标，录像会出现在这里，已支持多端自动同步。</p></div></div>'}
     </section>
   </section>`;
 }
@@ -396,10 +449,30 @@ function syncFavoriteButton() {
 
 function toggleFavorite() {
   if (!state.activeFavorite) return;
+  const target = { ...state.activeFavorite };
+  const targetId = Number(target.message_id);
   const favorites = loadFavorites();
-  const index = favorites.findIndex(item => Number(item.message_id) === Number(state.activeFavorite.message_id));
-  if (index >= 0) { favorites.splice(index, 1); toast('已取消收藏'); }
-  else { favorites.unshift(state.activeFavorite); toast('已加入收藏'); }
+  const index = favorites.findIndex(item => Number(item.message_id) === targetId);
+  const willBeFavorite = index < 0;
+
+  if (index >= 0) {
+    favorites.splice(index, 1);
+    toast('已取消收藏');
+    fetch(`/api/favorites/${targetId}`, { method: 'DELETE' }).catch(() => {});
+  } else {
+    favorites.unshift(target);
+    toast('已加入收藏');
+    fetch('/api/favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message_id: targetId,
+        channel: target.channel,
+        date: target.date,
+        time: target.time || '',
+      }),
+    }).catch(() => {});
+  }
   saveFavorites(favorites);
   syncFavoriteButton();
 }
@@ -540,4 +613,5 @@ window.addEventListener('popstate', event => {
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 if (!history.state || !Number.isFinite(history.state.scrollY)) history.replaceState({ ...(history.state || {}), scrollY: window.scrollY }, '', location.href);
 applyTheme(document.documentElement.dataset.themeMode || 'auto', false);
+syncRemoteFavorites();
 route();
