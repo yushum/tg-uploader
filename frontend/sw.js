@@ -1,12 +1,12 @@
 /* Replay PWA service worker.
  * 只缓存 App 壳子（HTML/JS/CSS/图标），/api/*（含录像 Range 分片流）永远直通网络，绝不缓存。
  */
-const SHELL_CACHE = 'replay-shell-v2';
+const SHELL_CACHE = 'replay-shell-v3';
 // 壳子文件增长封顶：发版时 ?v= 变化会产生新条目，超量时按插入顺序淘汰最旧的。
 const MAX_SHELL_ENTRIES = 60;
 
 function shellPath(pathname) {
-  if (pathname === '/app.js' || pathname === '/style.css') return true;
+  if (['/app.js', '/style.css', '/live.js', '/live.css'].includes(pathname)) return true;
   if (pathname === '/manifest.webmanifest') return true;
   if (pathname === '/static/app.js' || pathname === '/static/app.css') return true;
   if (pathname.startsWith('/icons/')) return true;
@@ -26,7 +26,7 @@ self.addEventListener('install', event => {
     caches
       .open(SHELL_CACHE)
       .then(cache =>
-        cache.addAll(['/', '/app.js', '/style.css', '/manifest.webmanifest', '/icons/icon-192.png'])
+        cache.addAll(['/', '/app.js?v=9', '/style.css?v=9', '/live.js?v=1', '/live.css?v=1', '/manifest.webmanifest', '/icons/icon-192.png'])
       )
       .then(() => self.skipWaiting())
   );

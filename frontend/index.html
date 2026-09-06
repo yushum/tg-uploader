@@ -22,7 +22,8 @@
     })();
   </script>
   <link rel="stylesheet" href="/static/app.css?v=20260901-rotate-player">
-  <link rel="stylesheet" href="/style.css?v=8">
+  <link rel="stylesheet" href="/style.css?v=9">
+  <link rel="stylesheet" href="/live.css?v=1">
 </head>
 <body>
   <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
@@ -51,33 +52,45 @@
   <main id="app"><div class="initial-loading"><i></i><span>正在加载录像…</span></div></main>
 
   <div class="toast" role="status" aria-live="polite"></div>
-  <button type="button" id="liveFab" class="live-fab" aria-label="打开推流面板"><span aria-hidden="true">📡</span><em>推流</em><b id="liveFabBadge" hidden></b><i id="liveFabDot" hidden></i></button>
-  <div class="live-sheet-backdrop" id="liveSheetBackdrop" hidden></div>
-  <section class="live-sheet" id="liveSheet" hidden aria-label="推流到 Telegram 频道">
-    <header class="live-sheet-head"><strong>📡 推流到 Telegram 频道</strong><button type="button" id="liveSheetClose" aria-label="关闭">✕</button></header>
-    <p class="live-status-line" id="liveStatus">空闲</p>
-    <label class="live-field"><span>目标频道</span><input id="liveChannel" placeholder="@my_channel" autocomplete="off"></label>
-    <div class="live-field"><span>主播（可多选，不选=全部）<span class="live-field-ops"><button type="button" id="liveStreamersAll">全选</button><button type="button" id="liveStreamersNone">清空</button></span></span>
-      <div class="live-streamer-box" id="liveStreamerBox"><p class="live-hint">加载中…</p></div>
+  <button type="button" id="liveFab" class="live-fab" aria-haspopup="dialog" aria-controls="liveSheet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5V7Z"/><path d="M5 5v14M20 5v14"/></svg><span>推流工作台</span><b id="liveFabBadge" hidden></b><i id="liveFabDot" hidden></i></button>
+  <dialog class="live-sheet" id="liveSheet" aria-labelledby="liveTitle" data-view="library">
+    <header class="live-sheet-head">
+      <div><span class="live-eyebrow">REPLAY / LIVE STUDIO</span><h2 id="liveTitle">让精彩，接着播。</h2><p>挑选录像，编排顺序，推流到 Telegram 频道。</p></div>
+      <button type="button" id="liveSheetClose" class="live-icon-button" aria-label="关闭工作台">✕</button>
+    </header>
+    <nav class="live-mobile-tabs" aria-label="工作台视图"><button type="button" data-live-view="library" aria-pressed="true">01 选择录像</button><button type="button" data-live-view="queue" aria-pressed="false">02 待播与开播 <b id="liveMobileCount">0</b></button></nav>
+    <div class="live-workspace">
+      <section class="live-library" aria-labelledby="liveLibraryTitle">
+        <div class="live-section-title"><div><span class="live-step">01</span><h3 id="liveLibraryTitle">选择录像</h3></div><span class="live-caption">勾选即加入待播</span></div>
+        <form id="liveFilterForm" class="live-filters">
+          <details class="live-streamer-filter"><summary>主播范围 <span id="liveStreamerSummary">全部主播</span></summary>
+            <div class="live-field-ops"><button type="button" id="liveStreamersAll">全选</button><button type="button" id="liveStreamersNone">不限主播</button></div>
+            <div class="live-streamer-box" id="liveStreamerBox"><p class="live-hint">正在加载主播…</p></div>
+          </details>
+          <div class="live-date-row"><label class="live-field"><span>开始日期</span><input type="date" id="liveFrom"></label><label class="live-field"><span>结束日期</span><input type="date" id="liveTo"></label><button type="submit" id="liveSearch" class="live-primary">查找录像</button></div>
+          <details class="live-advanced"><summary>排除指定日期 <span>可选</span></summary><label class="live-field"><span>多个日期用逗号分隔</span><input id="liveExclude" placeholder="2026-08-01, 2026-08-02" autocomplete="off"></label></details>
+          <p class="live-caption">不填日期则查找全部时间；已选录像不会因筛选改变而丢失。</p>
+        </form>
+        <div class="live-results-toolbar"><strong id="liveResultSummary" role="status">录像库</strong><div class="live-field-ops"><button type="button" id="liveResultsAll" disabled>全选</button><button type="button" id="liveResultsInvert" disabled>反选</button><button type="button" id="liveResultsNone" disabled>取消选择</button></div></div>
+        <div class="live-results" id="liveResults" aria-busy="false"><div class="live-empty"><span aria-hidden="true">＋</span><strong>从一段精彩开始</strong><p>设置主播和日期，查找想要推流的录像。<br>也可以在播放页将整场录像加入待播。</p></div></div>
+      </section>
+      <aside class="live-queue" aria-labelledby="liveQueueTitle">
+        <div class="live-section-title"><div><span class="live-step">02</span><h3 id="liveQueueTitle">待播清单 <b id="liveCount">0</b></h3></div><button type="button" id="liveClear" class="live-text-button" disabled>清空</button></div>
+        <p class="live-caption">按顺序播放 · 草稿自动保存在此浏览器</p>
+        <ol class="live-playlist" id="livePlaylist"></ol>
+        <div class="live-broadcast">
+          <label class="live-field"><span>推流到 Telegram</span><input id="liveChannel" placeholder="@my_channel 或频道 ID" autocomplete="off" spellcheck="false" aria-describedby="liveChannelHint"></label>
+          <p class="live-caption" id="liveChannelHint">请确保服务端登录账号拥有目标频道的直播管理权限。</p>
+          <div class="live-monitor" id="liveMonitor" data-status="unknown"><div><i></i><strong id="liveStatus">正在同步状态…</strong><span id="liveProgressText"></span></div><p id="liveCurrent">连接服务后即可开播</p><progress id="liveProgress" max="1" value="0" aria-label="推流录像进度" hidden></progress></div>
+          <p id="liveFeedback" class="live-feedback" role="status" aria-live="polite" hidden></p>
+          <div class="live-actions"><button type="button" id="liveStartBtn" class="live-primary" disabled>开始推流</button><button type="button" id="liveStopBtn" class="live-stop" hidden>停止推流</button></div>
+          <p class="live-caption live-close-hint">关闭工作台不会中断推流</p>
+        </div>
+      </aside>
     </div>
-    <div class="live-field"><span>日期范围（不填=不限）＋排除日期</span>
-      <div class="live-row">
-        <input type="date" id="liveFrom" aria-label="开始日期">
-        <span class="live-tilde">~</span>
-        <input type="date" id="liveTo" aria-label="结束日期">
-        <button type="button" id="liveSearch">查找</button>
-      </div>
-      <input class="live-exclude" id="liveExclude" placeholder="排除日期，如 2026-08-01, 2026-08-02" autocomplete="off">
-    </div>
-    <div class="live-field"><span>查找结果<span class="live-field-ops"><button type="button" id="liveResultsAll">全选</button><button type="button" id="liveResultsInvert">反选</button><button type="button" id="liveResultsNone">清空</button></span></span></div>
-    <div class="live-results" id="liveResults"><p class="live-hint">勾好主播和日期，点「查找」列出录像。打勾即加入待播；把某天的勾去掉就是排除那天。</p></div>
-    <div class="live-field"><span>待播清单（<b id="liveCount">0</b>）<span class="live-field-ops"><button type="button" id="liveClear">清空</button></span></span>
-      <ol class="live-playlist" id="livePlaylist"><li class="live-hint">还没有选片。可以在播放页给场次打勾，或上面按范围查找后勾选。</li></ol>
-    </div>
-    <div class="live-actions"><button type="button" id="liveStartBtn" class="primary">开始推流</button><button type="button" id="liveStopBtn">停止</button></div>
-  </section>
+  </dialog>
   <script src="/static/app.js?v=20260901-rotate-player"></script>
-  <script type="module" src="/app.js?v=8"></script>
+  <script type="module" src="/app.js?v=9"></script>
   <script>
     // PWA：注册 Service Worker（仅缓存 App 壳子，录像流直通网络）。
     // 非 https/localhost 环境会自动失败，静默忽略即可。
