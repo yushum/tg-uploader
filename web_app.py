@@ -230,6 +230,13 @@ async def _ensure_group_call_live(channel_peer) -> None:
         raise
 
 
+LIVE_STREAM_FETCH_TIMEOUT = 60
+# ffmpeg 输出进度超过此时长毫无增长，判定为停滞并跳过，避免无限假推流。
+LIVE_STREAM_PROGRESS_TIMEOUT = 120
+MAX_CONSECUTIVE_STALLS = 3
+WEB_PORT = int(os.getenv("WEB_PORT", "31527"))
+
+
 async def _drain_ffmpeg_stderr(proc, log: deque) -> None:
     """把 ffmpeg 的 stderr 收进环形缓冲，出问题时才能看到错因（原来直接丢黑洞）。"""
     try:
@@ -244,6 +251,50 @@ async def _drain_ffmpeg_stderr(proc, log: deque) -> None:
 
 def _ffmpeg_log_tail(log: deque) -> str:
     return " | ".join(log) if log else "(无输出)"
+
+
+async def _track_ffmpeg_progress(proc, progress: dict) -> None:
+    """解析 ffmpeg -progress 输出，把真实输出字节数写回状态。只在增长时刷新心跳。"""
+    try:
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", "replace").strip()
+            if text.startswith("total_size="):
+                try:
+                    size = int(text.split("=", 1)[1])
+                except ValueError:
+                    continue
+                if size > progress["bytes"]:
+                    progress["bytes"] = size
+                    progress["tick"] = time.monotonic()
+                    live_state.update(bytes_sent=size)
+    except Exception:
+        pass
+
+
+async def _watch_ffmpeg_progress(proc, progress: dict, timeout: float | None = None) -> None:
+    """输出进度长期不涨就杀掉 ffmpeg，主流程据 stalled 标记跳过本片段。"""
+    if timeout is None:
+        timeout = LIVE_STREAM_PROGRESS_TIMEOUT
+    try:
+        interval = min(10.0, timeout)
+        while proc.returncode is None:
+            await asyncio.sleep(interval)
+            if proc.returncode is not None:
+                break
+            if time.monotonic() - progress["tick"] > timeout:
+                progress["stalled"] = True
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
 
 
 async def _get_rtmp_url(channel_peer) -> str:
@@ -304,67 +355,54 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
                 continue
             live_state.update(bytes_sent=0)
             stderr_task = None
+            progress_task = None
+            watch_task = None
+            progress = {"bytes": 0, "tick": time.monotonic(), "stalled": False}
             ffmpeg_log: deque[str] = deque(maxlen=30)
             try:
+                # 直读本地媒体接口（支持 Range seek），moov 在文件尾也能播；
+                # 管道喂数据遇到 moov 在尾的 MP4 会卡死在探针阶段。
+                media_url = f"http://127.0.0.1:{WEB_PORT}/api/media/{message_id}"
                 live_process = await asyncio.create_subprocess_exec(
                     "ffmpeg", "-hide_banner", "-loglevel", "warning", "-re",
-                    "-i", "pipe:0",
+                    "-i", media_url,
                     "-c:v", "copy", "-c:a", "aac",
                     "-f", "flv", "-flvflags", "no_duration_filesize",
+                    "-progress", "pipe:1",
                     rtmp,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.DEVNULL,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
                 stderr_task = asyncio.create_task(_drain_ffmpeg_stderr(live_process, ffmpeg_log))
+                progress_task = asyncio.create_task(_track_ffmpeg_progress(live_process, progress))
+                watch_task = asyncio.create_task(_watch_ffmpeg_progress(live_process, progress))
             except Exception as exc:
                 logger.error("ffmpeg spawn failed: %s", exc)
                 live_state.update(error=str(exc))
                 continue
             try:
-                download = telegram.iter_download(message.document, chunk_size=512 * 1024)
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(
-                            download.__anext__(), timeout=LIVE_STREAM_CHUNK_TIMEOUT)
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        stalls += 1
-                        logger.error("Stream video %s: 下载停滞超过 %ss（连续 %s 次），ffmpeg 说：%s",
-                                     message_id, LIVE_STREAM_CHUNK_TIMEOUT, stalls,
-                                     _ffmpeg_log_tail(ffmpeg_log))
-                        if stalls >= MAX_CONSECUTIVE_STALLS:
-                            live_state.update(error=f"连续{stalls}个片段下载停滞，已停止推流")
-                            live_stop_event.set()
-                        else:
-                            live_state.update(error=f"片段 {message_id} 下载停滞，已跳过")
-                        try:
-                            live_process.kill()
-                        except Exception:
-                            pass
-                        break
-                    if live_stop_event.is_set():
-                        break
-                    if live_process.stdin is None or live_process.stdin.is_closing():
-                        break
-                    try:
-                        data = bytes(chunk)
-                        live_process.stdin.write(data)
-                        await live_process.stdin.drain()
-                        stalls = 0
-                        live_state.update(bytes_sent=live_state.get("bytes_sent", 0) + len(data))
-                    except (BrokenPipeError, ConnectionResetError):
-                        break
-                try:
-                    if live_process.stdin and not live_process.stdin.is_closing():
-                        live_process.stdin.close()
-                except Exception:
-                    pass
-                try:
-                    await asyncio.wait_for(live_process.wait(), timeout=30)
-                except asyncio.TimeoutError:
-                    live_process.kill()
+                await live_process.wait()
+                if live_stop_event.is_set():
+                    break
+                if progress["stalled"]:
+                    stalls += 1
+                    logger.error("Stream video %s: 输出停滞超过 %ss（连续 %s 次），ffmpeg 说：%s",
+                                 message_id, LIVE_STREAM_PROGRESS_TIMEOUT, stalls,
+                                 _ffmpeg_log_tail(ffmpeg_log))
+                    if stalls >= MAX_CONSECUTIVE_STALLS:
+                        live_state.update(error=f"连续{stalls}个片段推流停滞，已停止推流")
+                        live_stop_event.set()
+                    else:
+                        live_state.update(error=f"片段 {message_id} 推流停滞，已跳过")
+                    continue
+                if live_process.returncode != 0:
+                    logger.error("Stream video %s: ffmpeg 异常退出（code=%s），ffmpeg 说：%s",
+                                 message_id, live_process.returncode,
+                                 _ffmpeg_log_tail(ffmpeg_log))
+                    live_state.update(error=f"片段 {message_id} 推流异常退出，已跳过")
+                    continue
+                stalls = 0
             except Exception as exc:
                 logger.error("Stream video %s failed: %s: %s, ffmpeg 说：%s",
                              message_id, type(exc).__name__, exc, _ffmpeg_log_tail(ffmpeg_log))
@@ -373,12 +411,15 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
                 except Exception:
                     pass
             finally:
-                if stderr_task is not None:
-                    stderr_task.cancel()
-                    try:
-                        await stderr_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                for task in (stderr_task, progress_task, watch_task):
+                    if task is not None and not task.done():
+                        task.cancel()
+                for task in (stderr_task, progress_task, watch_task):
+                    if task is not None:
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):
+                            pass
                 live_process = None
         if live_stop_event.is_set() or mode == "once":
             break
@@ -436,10 +477,6 @@ async def live_stop():
     return {"ok": True}
 
 
-LIVE_STREAM_FETCH_TIMEOUT = 60
-# 单个视频下载超过此时长一个块都拿不到，判定为停滞并跳过，避免无限假推流。
-LIVE_STREAM_CHUNK_TIMEOUT = 60
-MAX_CONSECUTIVE_STALLS = 3
 MAX_LIVE_CANDIDATES = 10000
 # 超过此数量时跳过 Telegram 逐一核验，直接返回本地目录（开播时会自动跳过失效片段），
 # 避免数千个候选的串行核验把查找请求拖住几分钟。
