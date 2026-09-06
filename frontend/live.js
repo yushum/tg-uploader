@@ -206,11 +206,12 @@ export function initLiveStudio({api, state, escapeHtml, longDate, formatDuration
   function renderStatus() {
     const running = server?.status === 'STREAMING';
     const modeLabel = MODE_LABEL[server?.mode] || MODE_LABEL.once;
+    const pictureLabel = server?.picture === 'transcode' ? '适配转码' : server?.picture === 'copy' ? '原画直推' : '';
     const roundText = running && (server?.mode !== 'once' || (server?.round || 0) > 1) && server?.round ? `第${server.round}轮 ` : '';
     $('liveFabDot').hidden = !running;
     $('liveMonitor').dataset.status = !server ? 'unknown' : server.error ? 'error' : running ? 'streaming' : 'idle';
     $('liveStatus').textContent = !server ? '状态未连接' : running ? `正在推流 · ${modeLabel}` : server.error ? '推流异常' : '准备就绪';
-    $('liveCurrent').textContent = !server ? '暂时无法确认服务状态，正在自动重试。' : running ? `${server.channel} · ${server.current || '正在连接…'}${server.error ? ' · ' + server.error : ''}` : server.error || (selected.size ? `已选 ${selected.size} 段，${MODE_LABEL[liveMode()]}播放。` : '添加录像并填写目标频道后即可开播。');
+    $('liveCurrent').textContent = !server ? '暂时无法确认服务状态，正在自动重试。' : running ? `${server.channel} · ${server.current || '正在连接…'}${pictureLabel ? ` · ${pictureLabel}` : ''}${server.error ? ' · ' + server.error : ''}` : server.error || (selected.size ? `已选 ${selected.size} 段，${MODE_LABEL[liveMode()]}播放。` : '添加录像并填写目标频道后即可开播。');
     const pushedText = running && server?.bytes_sent ? ` · 已推 ${formatBytes(server.bytes_sent)}` : '';
     $('liveProgressText').textContent = running ? `${roundText}${server.index} / ${server.total}${pushedText}` : '';
     $('liveProgress').hidden = !running;

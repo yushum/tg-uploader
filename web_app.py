@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections import deque
 import math
@@ -186,6 +187,7 @@ live_state = {
     "mode": "once",  # once 单次 / loop 循环 / shuffle 随机
     "round": 0,  # 当前第几轮（循环/随机模式下递增）
     "bytes_sent": 0,  # 当前片段已喂给 ffmpeg 的字节数
+    "picture": "",  # copy 原画直推 / transcode 适配转码
     "current_message_id": None,
     "current_label": "",
     "error": "",
@@ -251,6 +253,124 @@ async def _drain_ffmpeg_stderr(proc, log: deque) -> None:
 
 def _ffmpeg_log_tail(log: deque) -> str:
     return " | ".join(log) if log else "(无输出)"
+
+
+LIVE_PROBE_TIMEOUT = 30
+LIVE_CANVAS_W, LIVE_CANVAS_H = 1920, 1080
+
+
+def _parse_ratio(text, default=1.0):
+    """解析 ffprobe 的 'N:M' 比例，缺失/非法时回 1.0。"""
+    try:
+        num, den = str(text or "").split(":")
+        num, den = float(num), float(den)
+        if num > 0 and den > 0:
+            return num / den
+    except (ValueError, AttributeError):
+        pass
+    return default
+
+
+def _stream_rotation(stream: dict) -> int:
+    """取视频流旋转角度（tags.rotate 或 H.264 SEI 显示矩阵），归一到 0/90/180/270。"""
+    candidates = []
+    try:
+        candidates.append(float((stream.get("tags") or {}).get("rotate", 0) or 0))
+    except (ValueError, TypeError):
+        pass
+    for side in stream.get("side_data_list") or []:
+        try:
+            if "rotation" in side:
+                candidates.append(float(side["rotation"]))
+        except (ValueError, TypeError):
+            pass
+    for value in candidates:
+        normalized = int(round(value)) % 360
+        if normalized:
+            return normalized
+    return 0
+
+
+def _parse_probe_streams(data: dict):
+    """从 ffprobe JSON 取首个视频流信息，拿不到返回 None（调用方回退 copy）。"""
+    for stream in (data or {}).get("streams") or []:
+        if stream.get("codec_type") != "video":
+            continue
+        try:
+            width, height = int(stream.get("width") or 0), int(stream.get("height") or 0)
+        except (ValueError, TypeError):
+            continue
+        if width <= 0 or height <= 0:
+            continue
+        return {
+            "codec": str(stream.get("codec_name") or "").lower(),
+            "width": width,
+            "height": height,
+            "sar": _parse_ratio(stream.get("sample_aspect_ratio")),
+            "rotation": _stream_rotation(stream),
+        }
+    return None
+
+
+async def _probe_live_video(media_url: str):
+    """探测待播视频的编码/尺寸/SAR/旋转，失败返回 None（回退 copy，不断播）。"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_streams", "-of", "json", media_url,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=LIVE_PROBE_TIMEOUT)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                pass
+            return None
+        if proc.returncode != 0:
+            return None
+        return _parse_probe_streams(json.loads((out or b"").decode("utf-8", "replace") or "{}"))
+    except Exception as exc:
+        logger.warning("live probe failed: %s: %s", type(exc).__name__, exc)
+        return None
+
+
+def _live_picture_plan(info):
+    """返回 (vf_or_None, 说明)。Telegram 直播按 16:9 输出，只有标准横屏 H.264 可 copy；
+    其他一律保持比例转码垫到 1920x1080，绝不拉伸。"""
+    if not info:
+        return None, "探测失败，原画直推"
+    width, height = info["width"], info["height"]
+    rotation = info.get("rotation") or 0
+    sar = info.get("sar") or 1.0
+    if rotation % 180 != 0:
+        width, height = height, width  # 解码端 autorotate 后的有效尺寸
+    dar = (width * sar) / height
+    clean = (info.get("codec") == "h264" and abs(sar - 1.0) < 0.01
+             and rotation % 360 == 0 and width % 2 == 0 and height % 2 == 0
+             and abs(dar - 16 / 9) / (16 / 9) < 0.02)
+    if clean:
+        return None, "原画直推"
+    parts = []
+    if abs(sar - 1.0) >= 0.01:
+        parts.append(f"scale=iw*{sar:.4f}:ih")
+    parts.append("scale=1920:1080:force_original_aspect_ratio=decrease")
+    parts.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+    parts.append("pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black")
+    parts.append("setsar=1")
+    reasons = []
+    if info.get("codec") != "h264":
+        reasons.append(info.get("codec") or "未知编码")
+    if rotation % 360:
+        reasons.append(f"旋转{rotation}°")
+    if abs(dar - 16 / 9) / (16 / 9) >= 0.02:
+        reasons.append(f"{width}x{height}非16:9")
+    if abs(sar - 1.0) >= 0.01:
+        reasons.append("像素非正方形")
+    return ",".join(parts), "适配转码(" + "、".join(reasons) + ")"
 
 
 async def _track_ffmpeg_progress(proc, progress: dict) -> None:
@@ -328,6 +448,7 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
         random.shuffle(order)
     round_no = 0
     stalls = 0
+    probe_cache: dict[int, object] = {}
     while True:
         round_no += 1
         live_state.update(round=round_no)
@@ -363,10 +484,20 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
                 # 直读本地媒体接口（支持 Range seek），moov 在文件尾也能播；
                 # 管道喂数据遇到 moov 在尾的 MP4 会卡死在探针阶段。
                 media_url = f"http://127.0.0.1:{WEB_PORT}/api/media/{message_id}"
+                if message_id not in probe_cache:
+                    probe_cache[message_id] = await _probe_live_video(media_url)
+                vf, picture_note = _live_picture_plan(probe_cache[message_id])
+                picture = "copy" if vf is None else "transcode"
+                live_state.update(picture=picture)
+                logger.info("Stream video %s: %s", message_id, picture_note)
+                video_args = ["-c:v", "copy"] if vf is None else [
+                    "-vf", vf, "-c:v", "libx264", "-preset", "veryfast",
+                    "-tune", "zerolatency", "-crf", "23", "-g", "60",
+                ]
                 live_process = await asyncio.create_subprocess_exec(
                     "ffmpeg", "-hide_banner", "-loglevel", "warning", "-re",
                     "-i", media_url,
-                    "-c:v", "copy", "-c:a", "aac",
+                    *video_args, "-c:a", "aac",
                     "-f", "flv", "-flvflags", "no_duration_filesize",
                     "-progress", "pipe:1",
                     rtmp,
@@ -428,7 +559,8 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
             logger.info("Live reshuffled for round %d", round_no + 1)
         else:
             logger.info("Live looping round %d", round_no + 1)
-    live_state.update(status="IDLE", current_message_id=None, current_label="", round=0)
+    live_state.update(status="IDLE", current_message_id=None, current_label="", round=0,
+                        picture="")
     logger.info("Live worker finished")
 
 
@@ -473,7 +605,7 @@ async def live_stop():
             pass
         live_task = None
     live_state.update(status="IDLE", current_message_id=None, current_label="",
-                        mode="once", round=0)
+                        mode="once", round=0, picture="")
     return {"ok": True}
 
 
@@ -573,6 +705,7 @@ async def live_status():
         "total": len(live_state["message_ids"]),
         "index": live_state["index"],
         "bytes_sent": live_state.get("bytes_sent", 0),
+        "picture": live_state.get("picture", ""),
         "mode": live_state.get("mode", "once"),
         "round": live_state.get("round", 0),
         "error": live_state["error"],

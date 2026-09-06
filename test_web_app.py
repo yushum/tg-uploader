@@ -352,6 +352,59 @@ class LivePlayModeTests(unittest.IsolatedAsyncioTestCase):
             await web_app._live_worker("@c", [7], "once")
         self.assertEqual(web_app.live_state["bytes_sent"], 5)
 
+    async def test_worker_transcodes_portrait_with_pillarbox(self):
+        spawned = []
+
+        def _capture(*a, **_k):
+            spawned.append((a, web_app.live_state.get("picture")))
+            return FakeStreamProc()
+
+        portrait = {"codec": "h264", "width": 1088, "height": 1920,
+                    "sar": 1.0, "rotation": 0}
+        fake = FakeStreamTelegram()
+        with patch.object(web_app, "telegram", fake), patch.object(
+            web_app, "_catalog", return_value=[]
+        ), patch.object(web_app, "_ensure_group_call_live", new=AsyncMock()), patch.object(
+            web_app, "_get_rtmp_url", new=AsyncMock(return_value="rtmp://x/live")
+        ), patch.object(asyncio, "create_subprocess_exec",
+                         new=AsyncMock(side_effect=_capture)), patch.object(
+            web_app, "_probe_live_video", new=AsyncMock(return_value=portrait)
+        ):
+            await web_app._live_worker("@c", [7], "once")
+        self.assertEqual(len(spawned), 1)
+        args, picture = spawned[0]
+        self.assertIn("-vf", args)
+        self.assertIn("libx264", args)
+        self.assertTrue(any("pad=1920:1080" in x for x in args))
+        self.assertNotIn("copy", args[args.index("-c:v") + 1:args.index("-c:v") + 2])
+        self.assertEqual(picture, "transcode")
+
+    async def test_worker_copies_clean_landscape(self):
+        spawned = []
+
+        def _capture(*a, **_k):
+            spawned.append((a, web_app.live_state.get("picture")))
+            return FakeStreamProc()
+
+        landscape = {"codec": "h264", "width": 1920, "height": 1080,
+                     "sar": 1.0, "rotation": 0}
+        fake = FakeStreamTelegram()
+        with patch.object(web_app, "telegram", fake), patch.object(
+            web_app, "_catalog", return_value=[]
+        ), patch.object(web_app, "_ensure_group_call_live", new=AsyncMock()), patch.object(
+            web_app, "_get_rtmp_url", new=AsyncMock(return_value="rtmp://x/live")
+        ), patch.object(asyncio, "create_subprocess_exec",
+                         new=AsyncMock(side_effect=_capture)), patch.object(
+            web_app, "_probe_live_video", new=AsyncMock(return_value=landscape)
+        ):
+            await web_app._live_worker("@c", [7], "once")
+        self.assertEqual(len(spawned), 1)
+        args, picture = spawned[0]
+        self.assertNotIn("-vf", args)
+        self.assertIn("-c:v", args)
+        self.assertEqual(args[args.index("-c:v") + 1], "copy")
+        self.assertEqual(picture, "copy")
+
     async def test_worker_shuffle_reorders_each_round(self):
         fake = FakeStreamTelegram(stop_after=2)
         with patch.object(web_app, "telegram", fake), patch.object(
@@ -364,6 +417,58 @@ class LivePlayModeTests(unittest.IsolatedAsyncioTestCase):
             await web_app._live_worker("@c", [7, 8], "shuffle")
         self.assertEqual(fake.streamed, [8, 7])
         self.assertEqual(mock_shuffle.call_count, 1)
+
+
+class LivePictureTests(unittest.TestCase):
+    def test_clean_landscape_copies(self):
+        vf, note = web_app._live_picture_plan(
+            {"codec": "h264", "width": 1920, "height": 1080, "sar": 1.0, "rotation": 0})
+        self.assertIsNone(vf)
+        self.assertEqual(note, "原画直推")
+
+    def test_portrait_pillarboxes_without_stretch(self):
+        vf, note = web_app._live_picture_plan(
+            {"codec": "h264", "width": 1088, "height": 1920, "sar": 1.0, "rotation": 0})
+        self.assertIn("pad=1920:1080", vf)
+        self.assertIn("setsar=1", vf)
+        self.assertIn("非16:9", note)
+
+    def test_rotated_landscape_counts_as_portrait(self):
+        vf, note = web_app._live_picture_plan(
+            {"codec": "h264", "width": 1920, "height": 1080, "sar": 1.0, "rotation": 90})
+        self.assertIn("pad=1920:1080", vf)
+        self.assertIn("旋转", note)
+
+    def test_non_h264_and_sar_transcode(self):
+        vf, _ = web_app._live_picture_plan(
+            {"codec": "hevc", "width": 1920, "height": 1080, "sar": 1.0, "rotation": 0})
+        self.assertIsNotNone(vf)
+        vf, _ = web_app._live_picture_plan(
+            {"codec": "h264", "width": 720, "height": 1280, "sar": 4 / 3, "rotation": 0})
+        self.assertIn("scale=iw*1.3333:ih", vf)
+
+    def test_unknown_probe_fails_open_to_copy(self):
+        vf, _ = web_app._live_picture_plan(None)
+        self.assertIsNone(vf)
+        self.assertIsNone(web_app._parse_probe_streams({}))
+        self.assertIsNone(web_app._parse_probe_streams({"streams": [{"codec_type": "audio"}]}))
+
+    def test_parse_helpers(self):
+        self.assertAlmostEqual(web_app._parse_ratio("16:9"), 16 / 9)
+        self.assertEqual(web_app._parse_ratio("0:1"), 1.0)
+        self.assertEqual(web_app._parse_ratio("N/A"), 1.0)
+        self.assertEqual(web_app._parse_ratio(None), 1.0)
+        self.assertEqual(web_app._stream_rotation({"tags": {"rotate": "90"}}), 90)
+        self.assertEqual(web_app._stream_rotation(
+            {"side_data_list": [{"rotation": -90.0}]}), 270)
+        self.assertEqual(web_app._stream_rotation({}), 0)
+        info = web_app._parse_probe_streams({"streams": [
+            {"codec_type": "video", "codec_name": "h264", "width": 1088,
+             "height": 1920, "sample_aspect_ratio": "1:1"},
+            {"codec_type": "audio", "codec_name": "aac"},
+        ]})
+        self.assertEqual(info, {"codec": "h264", "width": 1088, "height": 1920,
+                                "sar": 1.0, "rotation": 0})
 
 
 class FakeGroupCallTelegram:
