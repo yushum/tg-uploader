@@ -51,14 +51,27 @@
   <main id="app"><div class="initial-loading"><i></i><span>正在加载录像…</span></div></main>
 
   <div class="toast" role="status" aria-live="polite"></div>
-  <div class="live-dock" id="liveDock">
-    <label class="live-check-all"><input type="checkbox" id="liveCheckAll"> 全选本页</label>
-    <button type="button" id="liveSelectRange" title="按主播+日期范围选择">范围全选</button>
-    <input id="liveChannel" placeholder="目标频道 @my_channel" aria-label="目标频道">
-    <button type="button" id="liveStartBtn" class="live-start">开始推流</button>
-    <button type="button" id="liveStopBtn" class="live-stop">停止</button>
-    <span id="liveStatus" class="live-status">空闲</span>
-  </div>
+  <button type="button" id="liveFab" class="live-fab" aria-label="打开推流面板"><span aria-hidden="true">📡</span><em>推流</em><b id="liveFabBadge" hidden></b><i id="liveFabDot" hidden></i></button>
+  <div class="live-sheet-backdrop" id="liveSheetBackdrop" hidden></div>
+  <section class="live-sheet" id="liveSheet" hidden aria-label="推流到 Telegram 频道">
+    <header class="live-sheet-head"><strong>📡 推流到 Telegram 频道</strong><button type="button" id="liveSheetClose" aria-label="关闭">✕</button></header>
+    <p class="live-status-line" id="liveStatus">空闲</p>
+    <label class="live-field"><span>目标频道</span><input id="liveChannel" placeholder="@my_channel" autocomplete="off"></label>
+    <div class="live-field"><span>按主播 + 日期找片</span>
+      <div class="live-row">
+        <select id="liveStreamer" aria-label="选择主播"><option value="">选择主播…</option></select>
+        <input type="date" id="liveFrom" aria-label="开始日期">
+        <span class="live-tilde">~</span>
+        <input type="date" id="liveTo" aria-label="结束日期">
+        <button type="button" id="liveSearch">查找</button>
+      </div>
+    </div>
+    <div class="live-results" id="liveResults"><p class="live-hint">选好主播和日期范围，点「查找」就会列出录像，逐个打勾加入待播。</p></div>
+    <div class="live-field"><span>待播清单（<b id="liveCount">0</b>）<span class="live-field-ops"><button type="button" id="liveAddPage">＋加入本页全部</button><button type="button" id="liveClear">清空</button></span></span>
+      <ol class="live-playlist" id="livePlaylist"><li class="live-hint">还没有选片。可以在播放页给场次打勾，或上面按范围查找后勾选。</li></ol>
+    </div>
+    <div class="live-actions"><button type="button" id="liveStartBtn" class="primary">开始推流</button><button type="button" id="liveStopBtn">停止</button></div>
+  </section>
   <script src="/static/app.js?v=20260901-rotate-player"></script>
   <script type="module" src="/app.js?v=8"></script>
   <script>

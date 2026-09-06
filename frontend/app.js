@@ -616,131 +616,157 @@ applyTheme(document.documentElement.dataset.themeMode || 'auto', false);
 syncRemoteFavorites();
 route();
 
-/* ===== 直播推流：勾选 + 控制面板 ===== */
+/* ===== 直播推流：悬浮面板 + 选片 + 待播清单 ===== */
 (function(){
   const LIVE_CH_KEY='live-target-channel';
-  const selected=new Set();
-  const channelInput=()=>document.querySelector('#liveChannel');
-  const statusEl=()=>document.querySelector('#liveStatus');
-  const dock=()=>document.querySelector('#liveDock');
-  function restoreChannel(){ const el=channelInput(); if(el) el.value=localStorage.getItem(LIVE_CH_KEY)||''; }
-  function collectVisibleIds(){
-    // watch 页 session parts：用 message_id 锚点
-    const ids=[];
-    (state.currentSessions||[]).forEach(s=>{(s.parts||[]).forEach(p=>{ if(p.available) ids.push(Number(p.message_id)); });});
-    return ids;
+  const selected=new Map(); // message_id -> 人话标签
+  const byId=id=>document.querySelector(id);
+  const sheet=()=>byId('#liveSheet');
+  const backdrop=()=>byId('#liveSheetBackdrop');
+  const statusEl=()=>byId('#liveStatus');
+  const channelInput=()=>byId('#liveChannel');
+  function labelOf(mid){ return selected.get(Number(mid)) || ('id='+mid); }
+
+  function openSheet(){
+    if(!sheet()||!sheet().hidden) { fillStreamers(); return; }
+    sheet().hidden=false; backdrop().hidden=false;
+    document.body.style.overflow='hidden';
+    if(channelInput()&&!channelInput().value) channelInput().value=localStorage.getItem(LIVE_CH_KEY)||'';
+    fillStreamers();
+  }
+  function closeSheet(){ if(!sheet())return; sheet().hidden=true; backdrop().hidden=true; document.body.style.overflow=''; }
+
+  async function fillStreamers(){
+    const sel=byId('#liveStreamer'); if(!sel||sel.dataset.loaded) return;
+    try{
+      const list=await api('/api/streamers');
+      sel.innerHTML='<option value="">选择主播…</option>'+list.map(s=>`<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`).join('');
+      sel.dataset.loaded='1';
+    }catch{}
+    if(state.channel) sel.value=state.channel;
+    const today=new Date().toISOString().slice(0,10);
+    const from=byId('#liveFrom'),to=byId('#liveTo');
+    if(to&&!to.value) to.value=today;
+    if(from&&!from.value){
+      const past=new Date(Date.now()-30*86400000).toISOString().slice(0,10);
+      from.value=past;
+    }
+  }
+
+  async function search(){
+    const streamer=byId('#liveStreamer')?.value||state.channel||'';
+    const from=byId('#liveFrom')?.value||'',to=byId('#liveTo')?.value||'';
+    const box=byId('#liveResults');
+    if(!streamer) return toast('先选一位主播');
+    if(!from||!to) return toast('把开始和结束日期都选上');
+    box.innerHTML='<p class="live-hint">正在查找…</p>';
+    try{
+      const items=await api('/api/live/candidates',{streamer,from_date:from,to_date:to});
+      if(!items.length){ box.innerHTML=`<p class="live-hint">${escapeHtml(streamer)} 在 ${from} ~ ${to} 没有录像，换个范围试试。</p>`; return; }
+      const avail=items.filter(i=>i.available).length;
+      box.innerHTML=`<p class="live-hint">找到 ${items.length} 个录像（可播 ${avail} 个），打勾即加入待播：</p>`+items.map(i=>{
+        const mid=Number(i.message_id),on=selected.has(mid);
+        const full=`${escapeHtml(streamer)} ${escapeHtml(i.label)}`;
+        return `<label class="live-result ${i.available?'':'unavailable'}"><input type="checkbox" data-mid="${mid}" data-label="${full}" ${on?'checked':''} ${i.available?'':'disabled'}><span>${full}</span><small>${i.available?formatDuration(i.duration):'已失效'}</small></label>`;
+      }).join('');
+    }catch(e){ box.innerHTML='<p class="live-hint">查找失败：'+escapeHtml(e.message)+'</p>'; }
+  }
+
+  function renderPlaylist(){
+    const list=byId('#livePlaylist'); if(!list) return;
+    byId('#liveCount').textContent=selected.size;
+    const badge=byId('#liveFabBadge');
+    badge.hidden=!selected.size; badge.textContent=selected.size||'';
+    document.querySelectorAll('.live-check').forEach(c=>{
+      if(c.dataset.session!==undefined&&c.dataset.session!==''){
+        const parts=sessionParts(Number(c.dataset.session));
+        c.checked=parts.length>0&&parts.every(({mid})=>selected.has(mid));
+      }else c.checked=selected.has(Number(c.dataset.mid));
+    });
+    document.querySelectorAll('.live-result input').forEach(c=>{ if(!c.disabled) c.checked=selected.has(Number(c.dataset.mid)); });
+    if(!selected.size){ list.innerHTML='<li class="live-hint">还没有选片。可以在播放页给场次打勾，或上面按范围查找后勾选。</li>'; return; }
+    list.innerHTML=[...selected].map(([mid,label])=>`<li><span>${escapeHtml(label)}</span><button type="button" data-remove-mid="${mid}" aria-label="移除">✕</button></li>`).join('');
+  }
+
+  function sessionParts(idx){
+    const s=(state.currentSessions||[])[idx]; if(!s) return [];
+    return (s.parts||[]).filter(p=>p.available).map(p=>({mid:Number(p.message_id),label:`${state.channel} ${state.date} ${s.time.slice(0,5)} ${p.label||('P'+p.position)}`}));
   }
   function injectCheckboxes(){
-    // 在每个 session-item 前注入 checkbox（watch 页）
     document.querySelectorAll('.session-item').forEach(item=>{
       if(item.querySelector('.live-check')) return;
-      const idx=Number(item.dataset.sessionIndex);
-      const session=(state.currentSessions||[])[idx];
-      if(!session) return;
-      const anchor=(session.parts||[]).find(p=>p.available);
-      if(!anchor) return;
-      const id=Number(anchor.message_id);
+      const parts=sessionParts(Number(item.dataset.sessionIndex));
+      if(!parts.length) return;
       const label=document.createElement('label');
       label.className='live-check-label';
-      label.innerHTML=`<input type="checkbox" class="live-check" data-mid="${id}" ${selected.has(id)?'checked':''}> 选播`;
+      label.innerHTML=`<input type="checkbox" class="live-check" data-session="${item.dataset.sessionIndex}"> 选播本场（${parts.length}段）`;
       label.addEventListener('click',e=>e.stopPropagation());
       label.querySelector('input').addEventListener('change',e=>{
         e.stopPropagation();
-        if(e.target.checked) selected.add(id); else selected.delete(id);
-        syncDock();
+        sessionParts(Number(item.dataset.sessionIndex)).forEach(({mid,label:labelText})=>{
+          if(e.target.checked) selected.set(mid,labelText); else selected.delete(mid);
+        });
+        renderPlaylist();
       });
       item.prepend(label);
     });
-    // parts 明细（如有 .part-row 结构）同样支持
-    document.querySelectorAll('[data-part-mid]').forEach(row=>{
-      if(row.querySelector('.live-check')) return;
-      const id=Number(row.dataset.partMid);
-      const label=document.createElement('label');
-      label.className='live-check-label';
-      label.innerHTML=`<input type="checkbox" class="live-check" data-mid="${id}" ${selected.has(id)?'checked':''}>`;
-      label.querySelector('input').addEventListener('change',e=>{
-        if(e.target.checked) selected.add(id); else selected.delete(id);
-        syncDock();
-      });
-      row.prepend(label);
-    });
   }
-  function syncDock(){
-    const st=statusEl(); if(!st) return;
-    st.textContent=`已选 ${selected.size} 个`;
-    document.querySelectorAll('.live-check').forEach(c=>{
-      c.checked=selected.has(Number(c.dataset.mid));
-    });
+
+  function addCurrentPage(){
+    const all=(state.currentSessions||[]).flatMap((_,i)=>sessionParts(i));
+    if(!all.length) return toast('本页没有可加入的录像');
+    all.forEach(({mid,label:labelText})=>selected.set(mid,labelText));
+    renderPlaylist(); toast(`已加入本页 ${all.length} 个录像`);
   }
+
   async function refreshStatus(){
     try{
-      const r=await fetch('/api/live/status'); const s=await r.json();
+      const s=await api('/api/live/status');
       const st=statusEl(); if(!st) return;
-      if(s.status==='STREAMING'){
-        st.textContent=`🔴 推流中 ${s.channel} · 正在播放 ${s.current||('id='+s.current_message_id)}（${s.index}/${s.total}）${s.error?' · '+s.error:''} · 已选 ${selected.size} 个`;
-      } else if(selected.size){ st.textContent=`已选 ${selected.size} 个 · 空闲`; }
-      else st.textContent='空闲';
+      byId('#liveFabDot').hidden=s.status!=='STREAMING';
+      if(s.status==='STREAMING') st.textContent=`🔴 推流中 ${s.channel} · 正在播放 ${s.current||('id='+s.current_message_id)}（${s.index}/${s.total}）${s.error?' · '+s.error:''}`;
+      else st.textContent=selected.size?`空闲 · 待播 ${selected.size} 个，点「开始推流」开播`:'空闲';
     }catch{}
   }
+
   async function startLive(){
     const channel=(channelInput()?.value||'').trim();
-    if(!channel) return toast('请先填写目标频道');
+    if(!channel) return toast('先填写目标频道，例如 @my_channel');
     localStorage.setItem(LIVE_CH_KEY,channel);
-    if(!selected.size){
-      // 默认把本页全部可用录像加入队列
-      collectVisibleIds().forEach(id=>selected.add(id));
-    }
-    if(!selected.size) return toast('请至少勾选一个录像');
+    if(!selected.size) return toast('待播清单是空的，先勾选录像');
     try{
-      const r=await fetch('/api/live/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel,message_ids:[...selected]})});
+      const r=await fetch('/api/live/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel,message_ids:[...selected.keys()]})});
       const j=await r.json();
       if(!r.ok) return toast(j.detail||'开播失败');
-      toast(`已开播 ${channel}，共 ${j.count} 集`);
+      toast(`已开播 ${channel}，共 ${j.count} 个录像`);
     }catch(e){ toast('开播失败：'+e.message); }
     refreshStatus();
   }
-  async function stopLive(){
-    try{ await fetch('/api/live/stop',{method:'POST'}); toast('已停止推流'); }catch{}
-    refreshStatus();
-  }
-  async function selectRange(){
-    // 按主播+时间段全选：弹窗要起止日期，遍历 /api/dates + /api/sessions
-    const channel=state.channel;
-    if(!channel) return toast('请先进入某位主播的页面');
-    const from=prompt('起始日期 YYYY-MM-DD','2024-01-01'); if(!from) return;
-    const to=prompt('结束日期 YYYY-MM-DD',new Date().toISOString().slice(0,10)); if(!to) return;
-    toast('正在按范围收集录像…');
-    try{
-      const dates=await (await fetch(`/api/dates?streamer=${encodeURIComponent(channel)}`)).json();
-      const inRange=dates.filter(d=>d.date>=from&&d.date<=to);
-      let n=0;
-      for(const d of inRange){
-        const sessions=await (await fetch(`/api/sessions?streamer=${encodeURIComponent(channel)}&date=${d.date}`)).json();
-        sessions.forEach(s=>(s.parts||[]).forEach(p=>{ if(p.available){ selected.add(Number(p.message_id)); n++; } }));
-      }
-      syncDock(); injectCheckboxes();
-      toast(`已选中 ${channel} ${from}~${to} 共 ${n} 个录像`);
-    }catch(e){ toast('范围选择失败：'+e.message); }
-  }
+  async function stopLive(){ try{ await fetch('/api/live/stop',{method:'POST'}); toast('已停止推流'); }catch{} refreshStatus(); }
+
   document.addEventListener('click',e=>{
-    if(e.target.closest('#liveStartBtn')) startLive();
-    else if(e.target.closest('#liveStopBtn')) stopLive();
-    else if(e.target.closest('#liveSelectRange')) selectRange();
+    if(e.target.closest('#liveFab')){ openSheet(); return; }
+    if(e.target.closest('#liveSheetClose')||e.target===backdrop()){ closeSheet(); return; }
+    if(e.target.closest('#liveStartBtn')){ startLive(); return; }
+    if(e.target.closest('#liveStopBtn')){ stopLive(); return; }
+    if(e.target.closest('#liveSearch')){ search(); return; }
+    if(e.target.closest('#liveAddPage')){ addCurrentPage(); return; }
+    if(e.target.closest('#liveClear')){ selected.clear(); renderPlaylist(); return; }
+    const rm=e.target.closest('[data-remove-mid]');
+    if(rm){ selected.delete(Number(rm.dataset.removeMid)); renderPlaylist(); return; }
   });
   document.addEventListener('change',e=>{
-    if(e.target.id==='liveCheckAll'){
-      const ids=collectVisibleIds();
-      if(e.target.checked) ids.forEach(id=>selected.add(id));
-      else ids.forEach(id=>selected.delete(id));
-      syncDock(); injectCheckboxes();
+    if(e.target.matches('.live-result input')){
+      const mid=Number(e.target.dataset.mid);
+      if(e.target.checked) selected.set(mid,e.target.dataset.label||('id='+mid));
+      else selected.delete(mid);
+      renderPlaylist(); return;
     }
     if(e.target.id==='liveChannel') localStorage.setItem(LIVE_CH_KEY,e.target.value.trim());
   });
-  // 路由变化后重新注入
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeSheet(); });
   const obs=new MutationObserver(()=>injectCheckboxes());
   obs.observe(document.documentElement,{childList:true,subtree:true});
-  restoreChannel(); syncDock();
-  setInterval(refreshStatus,3000); refreshStatus();
-  // 对外暴露，方便调试
-  window.__live={selected,selectRange,startLive,stopLive};
+  renderPlaylist(); refreshStatus(); setInterval(refreshStatus,3000);
+  window.__live={selected,openSheet,startLive,stopLive};
 })();

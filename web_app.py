@@ -341,6 +341,49 @@ async def live_stop():
     return {"ok": True}
 
 
+@app.get("/api/live/candidates")
+async def live_candidates(
+    streamer: str = Query(min_length=1),
+    from_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    to_date: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+):
+    """按主播+日期范围一次列出可推流录像（含时长与是否仍可播）。"""
+    parts = sorted(
+        [part for part in _catalog()
+         if part.streamer == streamer and from_date <= part.date <= to_date],
+        key=lambda part: (part.date, part.time, part.message_id),
+    )
+    details_by_id: dict[int, dict] = {}
+    if parts and telegram is not None:
+        ids = [part.message_id for part in parts]
+        try:
+            for offset in range(0, len(ids), 100):
+                messages = await telegram.get_messages(CHANNEL_ID, ids=ids[offset:offset + 100])
+                if not isinstance(messages, list):
+                    messages = [messages]
+                for message in messages:
+                    if message is None or not getattr(message, "document", None):
+                        continue
+                    details = _video_details(message)
+                    if details:
+                        details_by_id[message.id] = details
+        except Exception as exc:
+            logger.warning("live candidates lookup failed: %s", exc)
+    return [
+        {
+            "message_id": part.message_id,
+            "streamer": part.streamer,
+            "date": part.date,
+            "time": part.time[:5],
+            "part_label": part.part_label,
+            "label": f"{part.date} {part.time[:5]} {part.part_label}",
+            "duration": details_by_id.get(part.message_id, {}).get("duration", 0),
+            "available": part.message_id in details_by_id,
+        }
+        for part in parts
+    ]
+
+
 @app.get("/api/live/status")
 async def live_status():
     return {
