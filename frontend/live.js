@@ -4,6 +4,12 @@ export function initLiveStudio({api, state, escapeHtml, longDate, formatDuration
   const sheet = $('liveSheet');
   const DRAFT_KEY = 'replay-live-draft-v1', CHANNEL_KEY = 'live-target-channel', MODE_KEY = 'live-play-mode';
   const MODE_LABEL = {once: '单次', loop: '循环', shuffle: '随机'};
+  function formatBytes(value) {
+    const bytes = Math.max(0, Number(value) || 0);
+    if (bytes < 1048576) return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+    if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)}MB`;
+    return `${(bytes / 1073741824).toFixed(2)}GB`;
+  }
   function liveMode() {
     const checked = sheet.querySelector('input[name="liveMode"]:checked');
     return checked && MODE_LABEL[checked.value] ? checked.value : 'once';
@@ -205,7 +211,8 @@ export function initLiveStudio({api, state, escapeHtml, longDate, formatDuration
     $('liveMonitor').dataset.status = !server ? 'unknown' : server.error ? 'error' : running ? 'streaming' : 'idle';
     $('liveStatus').textContent = !server ? '状态未连接' : running ? `正在推流 · ${modeLabel}` : server.error ? '推流异常' : '准备就绪';
     $('liveCurrent').textContent = !server ? '暂时无法确认服务状态，正在自动重试。' : running ? `${server.channel} · ${server.current || '正在连接…'}${server.error ? ' · ' + server.error : ''}` : server.error || (selected.size ? `已选 ${selected.size} 段，${MODE_LABEL[liveMode()]}播放。` : '添加录像并填写目标频道后即可开播。');
-    $('liveProgressText').textContent = running ? `${roundText}${server.index} / ${server.total}` : '';
+    const pushedText = running && server?.bytes_sent ? ` · 已推 ${formatBytes(server.bytes_sent)}` : '';
+    $('liveProgressText').textContent = running ? `${roundText}${server.index} / ${server.total}${pushedText}` : '';
     $('liveProgress').hidden = !running;
     $('liveProgress').max = Math.max(1, server?.total || 0);
     $('liveProgress').value = server?.index || 0;

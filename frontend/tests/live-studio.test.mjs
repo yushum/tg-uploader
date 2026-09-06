@@ -167,7 +167,7 @@ test('live studio: cancel search, unverified rows, play modes', async () => {
       if (path === '/api/live/start') {
         const body = route.request().postDataJSON();
         starts.push(body);
-        status = {status: 'STREAMING', channel: body.channel, current: '2026-08-01 20:00 P1', index: 1, total: 1, mode: body.mode, round: 3, error: ''};
+        status = {status: 'STREAMING', channel: body.channel, current: '2026-08-01 20:00 P1', index: 1, total: 1, mode: body.mode, round: 3, bytes_sent: 12582912, error: ''};
         data = {count: 1, mode: body.mode};
       }
       if (path === '/api/live/stop') { status = {status: 'IDLE', error: ''}; data = {ok: true}; }
@@ -204,7 +204,7 @@ test('live studio: cancel search, unverified rows, play modes', async () => {
     await page.locator('#liveStartBtn').click();
     await page.waitForFunction(() => document.querySelector('#liveStatus').textContent.includes('随机'));
     assert.deepEqual(starts, [{channel: '@test', message_ids: [21], mode: 'shuffle'}]);
-    assert.match(await page.locator('#liveProgressText').textContent(), /第3轮 1 \/ 1/);
+    assert.match(await page.locator('#liveProgressText').textContent(), /第3轮 1 \/ 1 · 已推 12\.0MB/);
     assert.equal(await page.locator('input[name="liveMode"]').first().isDisabled(), true);
     await page.locator('#liveStopBtn').click();
     await page.waitForFunction(() => document.querySelector('#liveStatus').textContent === '准备就绪');

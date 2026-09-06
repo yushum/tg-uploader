@@ -179,12 +179,14 @@ class FakeStreamStdin:
 class FakeStreamProc:
     def __init__(self):
         self.stdin = FakeStreamStdin()
+        self.stderr = None
+        self.killed = False
 
     async def wait(self):
         return 0
 
     def kill(self):
-        pass
+        self.killed = True
 
 
 class FakeStreamTelegram:
@@ -294,6 +296,48 @@ class LivePlayModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.streamed, [])
         self.assertEqual(web_app.live_state["status"], "IDLE")
         self.assertIn("超时", web_app.live_state["error"])
+
+    async def test_worker_skips_on_chunk_stall_and_kills_ffmpeg(self):
+        procs = []
+
+        def _spawn(*_a, **_k):
+            proc = FakeStreamProc()
+            procs.append(proc)
+            return proc
+
+        class HangingDownloadTelegram(FakeStreamTelegram):
+            def iter_download(self, _document, **_kwargs):
+                async def _gen():
+                    await asyncio.Event().wait()
+                    yield b"never"
+
+                return _gen()
+
+        fake = HangingDownloadTelegram()
+        with patch.object(web_app, "telegram", fake), patch.object(
+            web_app, "_catalog", return_value=[]
+        ), patch.object(web_app, "_ensure_group_call_live", new=AsyncMock()), patch.object(
+            web_app, "_get_rtmp_url", new=AsyncMock(return_value="rtmp://x/live")
+        ), patch.object(asyncio, "create_subprocess_exec",
+                         new=AsyncMock(side_effect=_spawn)), patch.object(
+            web_app, "LIVE_STREAM_CHUNK_TIMEOUT", 0.05
+        ):
+            await web_app._live_worker("@c", [7], "once")
+        self.assertEqual(fake.streamed, [7])
+        self.assertTrue(procs and procs[0].killed)
+        self.assertEqual(web_app.live_state["status"], "IDLE")
+        self.assertIn("停滞", web_app.live_state["error"])
+
+    async def test_worker_counts_bytes_sent(self):
+        fake = FakeStreamTelegram()
+        with patch.object(web_app, "telegram", fake), patch.object(
+            web_app, "_catalog", return_value=[]
+        ), patch.object(web_app, "_ensure_group_call_live", new=AsyncMock()), patch.object(
+            web_app, "_get_rtmp_url", new=AsyncMock(return_value="rtmp://x/live")
+        ), patch.object(asyncio, "create_subprocess_exec",
+                         new=AsyncMock(side_effect=lambda *a, **k: FakeStreamProc())):
+            await web_app._live_worker("@c", [7], "once")
+        self.assertEqual(web_app.live_state["bytes_sent"], len(b"chunk"))
 
     async def test_worker_shuffle_reorders_each_round(self):
         fake = FakeStreamTelegram(stop_after=2)

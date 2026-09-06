@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections import deque
 import math
 import os
 import random
@@ -184,6 +185,7 @@ live_state = {
     "index": 0,
     "mode": "once",  # once 单次 / loop 循环 / shuffle 随机
     "round": 0,  # 当前第几轮（循环/随机模式下递增）
+    "bytes_sent": 0,  # 当前片段已喂给 ffmpeg 的字节数
     "current_message_id": None,
     "current_label": "",
     "error": "",
@@ -228,6 +230,22 @@ async def _ensure_group_call_live(channel_peer) -> None:
         raise
 
 
+async def _drain_ffmpeg_stderr(proc, log: deque) -> None:
+    """把 ffmpeg 的 stderr 收进环形缓冲，出问题时才能看到错因（原来直接丢黑洞）。"""
+    try:
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            log.append(line.decode("utf-8", "replace").rstrip())
+    except Exception:
+        pass
+
+
+def _ffmpeg_log_tail(log: deque) -> str:
+    return " | ".join(log) if log else "(无输出)"
+
+
 async def _get_rtmp_url(channel_peer) -> str:
     result = await telegram(functions.phone.GetGroupCallStreamRtmpUrlRequest(peer=channel_peer, revoke=False))
     url = getattr(result, "url", "") or ""
@@ -258,6 +276,7 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
     if mode == "shuffle":
         random.shuffle(order)
     round_no = 0
+    stalls = 0
     while True:
         round_no += 1
         live_state.update(round=round_no)
@@ -283,6 +302,9 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
             if not message or not getattr(message, "document", None):
                 logger.warning("Skip missing message %s", message_id)
                 continue
+            live_state.update(bytes_sent=0)
+            stderr_task = None
+            ffmpeg_log: deque[str] = deque(maxlen=30)
             try:
                 live_process = await asyncio.create_subprocess_exec(
                     "ffmpeg", "-hide_banner", "-loglevel", "warning", "-re",
@@ -292,21 +314,46 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
                     rtmp,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
                 )
+                stderr_task = asyncio.create_task(_drain_ffmpeg_stderr(live_process, ffmpeg_log))
             except Exception as exc:
                 logger.error("ffmpeg spawn failed: %s", exc)
                 live_state.update(error=str(exc))
                 continue
             try:
-                async for chunk in telegram.iter_download(message.document, chunk_size=512 * 1024):
+                download = telegram.iter_download(message.document, chunk_size=512 * 1024)
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            download.__anext__(), timeout=LIVE_STREAM_CHUNK_TIMEOUT)
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        stalls += 1
+                        logger.error("Stream video %s: 下载停滞超过 %ss（连续 %s 次），ffmpeg 说：%s",
+                                     message_id, LIVE_STREAM_CHUNK_TIMEOUT, stalls,
+                                     _ffmpeg_log_tail(ffmpeg_log))
+                        if stalls >= MAX_CONSECUTIVE_STALLS:
+                            live_state.update(error=f"连续{stalls}个片段下载停滞，已停止推流")
+                            live_stop_event.set()
+                        else:
+                            live_state.update(error=f"片段 {message_id} 下载停滞，已跳过")
+                        try:
+                            live_process.kill()
+                        except Exception:
+                            pass
+                        break
                     if live_stop_event.is_set():
                         break
                     if live_process.stdin is None or live_process.stdin.is_closing():
                         break
                     try:
-                        live_process.stdin.write(bytes(chunk))
+                        data = bytes(chunk)
+                        live_process.stdin.write(data)
                         await live_process.stdin.drain()
+                        stalls = 0
+                        live_state.update(bytes_sent=live_state.get("bytes_sent", 0) + len(data))
                     except (BrokenPipeError, ConnectionResetError):
                         break
                 try:
@@ -319,12 +366,19 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
                 except asyncio.TimeoutError:
                     live_process.kill()
             except Exception as exc:
-                logger.error("Stream video %s failed: %s", message_id, exc)
+                logger.error("Stream video %s failed: %s: %s, ffmpeg 说：%s",
+                             message_id, type(exc).__name__, exc, _ffmpeg_log_tail(ffmpeg_log))
                 try:
                     live_process.kill()
                 except Exception:
                     pass
             finally:
+                if stderr_task is not None:
+                    stderr_task.cancel()
+                    try:
+                        await stderr_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 live_process = None
         if live_stop_event.is_set() or mode == "once":
             break
@@ -383,6 +437,9 @@ async def live_stop():
 
 
 LIVE_STREAM_FETCH_TIMEOUT = 60
+# 单个视频下载超过此时长一个块都拿不到，判定为停滞并跳过，避免无限假推流。
+LIVE_STREAM_CHUNK_TIMEOUT = 60
+MAX_CONSECUTIVE_STALLS = 3
 MAX_LIVE_CANDIDATES = 10000
 # 超过此数量时跳过 Telegram 逐一核验，直接返回本地目录（开播时会自动跳过失效片段），
 # 避免数千个候选的串行核验把查找请求拖住几分钟。
@@ -478,6 +535,7 @@ async def live_status():
         "current": live_state["current_label"],
         "total": len(live_state["message_ids"]),
         "index": live_state["index"],
+        "bytes_sent": live_state.get("bytes_sent", 0),
         "mode": live_state.get("mode", "once"),
         "round": live_state.get("round", 0),
         "error": live_state["error"],
