@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f5f5f7">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Replay">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <title>Replay · 直播回放</title>
   <script>
     (() => {
@@ -46,5 +53,14 @@
   <div class="toast" role="status" aria-live="polite"></div>
   <script src="/static/app.js?v=20260901-rotate-player"></script>
   <script type="module" src="/app.js?v=7"></script>
+  <script>
+    // PWA：注册 Service Worker（仅缓存 App 壳子，录像流直通网络）。
+    // 非 https/localhost 环境会自动失败，静默忽略即可。
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      });
+    }
+  </script>
 </body>
 </html>

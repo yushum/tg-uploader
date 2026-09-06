@@ -167,6 +167,35 @@ async def design_app_style():
     return FileResponse(FRONTEND_DIR / "style.css", media_type="text/css")
 
 
+PWA_ICONS = frozenset({"icon-192.png", "icon-512.png", "maskable-512.png", "apple-touch-icon.png"})
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+async def pwa_manifest():
+    return FileResponse(FRONTEND_DIR / "manifest.webmanifest", media_type="application/manifest+json")
+
+
+@app.get("/sw.js", include_in_schema=False)
+async def pwa_service_worker():
+    # SW 自身绝不能被缓存，否则发版后客户端收不到更新。
+    return FileResponse(
+        FRONTEND_DIR / "sw.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/icons/{filename}", include_in_schema=False)
+async def pwa_icon(filename: str):
+    if filename not in PWA_ICONS:
+        raise HTTPException(status_code=404, detail="图标不存在")
+    return FileResponse(
+        FRONTEND_DIR / "icons" / filename,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/streamers", include_in_schema=False)
 @app.get("/favorites", include_in_schema=False)
 async def design_page():
