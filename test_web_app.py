@@ -406,6 +406,53 @@ class LivePlayModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[args.index("-c:v") + 1], "copy")
         self.assertEqual(picture, "copy")
 
+    async def test_spawn_after_stop_killed_instantly(self):
+        procs = []
+
+        def _spawn_and_stop(*_a, **_k):
+            # 模拟停止恰好落在产卵瞬间：事件已置位，进程刚出生。
+            web_app.live_stop_event.set()
+            proc = FakeStreamProc()
+            procs.append(proc)
+            return proc
+
+        fake = FakeStreamTelegram()
+        with patch.object(web_app, "telegram", fake), patch.object(
+            web_app, "_catalog", return_value=[]
+        ), patch.object(web_app, "_ensure_group_call_live", new=AsyncMock()), patch.object(
+            web_app, "_get_rtmp_url", new=AsyncMock(return_value="rtmp://x/live")
+        ), patch.object(asyncio, "create_subprocess_exec",
+                         new=AsyncMock(side_effect=_spawn_and_stop)):
+            await web_app._live_worker("@c", [7], "once")
+        self.assertEqual(fake.streamed, [7])
+        self.assertTrue(procs and procs[0].killed)
+        self.assertIsNone(web_app.live_process)
+        self.assertEqual(web_app.live_state["status"], "IDLE")
+
+    async def test_stop_kills_sweeps_discards_and_idles(self):
+        from unittest.mock import Mock
+        proc = SimpleNamespace(pid=4321, kill=Mock())
+        web_app.live_process = proc
+        task = asyncio.create_task(asyncio.sleep(60))
+        web_app.live_task = task
+        web_app.live_state.update(status="STREAMING", channel="@c")
+        try:
+            with patch.object(web_app, "_kill_stray_rtmp_ffmpeg",
+                               return_value=1) as sweep, patch.object(
+                web_app, "_discard_group_call", new=AsyncMock(return_value=True)
+            ) as discard:
+                result = await web_app.live_stop()
+            self.assertEqual(result, {"ok": True})
+            proc.kill.assert_called_once_with()
+            self.assertTrue(task.cancelled() or task.done())
+            self.assertIsNone(web_app.live_task)
+            sweep.assert_called_once_with()
+            discard.assert_awaited_once_with("@c")
+            self.assertEqual(web_app.live_state["status"], "IDLE")
+            self.assertEqual(web_app.live_state["mode"], "once")
+        finally:
+            web_app.live_process = None
+
     async def test_worker_shuffle_reorders_each_round(self):
         fake = FakeStreamTelegram(stop_after=2)
         with patch.object(web_app, "telegram", fake), patch.object(
@@ -472,6 +519,75 @@ class LivePictureTests(unittest.TestCase):
         ]})
         self.assertEqual(info, {"codec": "h264", "width": 1088, "height": 1920,
                                 "sar": 1.0, "rotation": 0})
+
+
+class StraySweepTests(unittest.TestCase):
+    def _fake_proc(self, root, pid, cmdline):
+        d = Path(root) / pid
+        d.mkdir(parents=True, exist_ok=True)
+        if cmdline is not None:
+            (d / "cmdline").write_bytes(cmdline)
+
+    def test_sweep_kills_only_rtmp_ffmpeg(self):
+        import tempfile
+        killed = []
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fake_proc(tmp, "11", b"/usr/bin/ffmpeg\0-re\0rtmps://x/y\0")
+            self._fake_proc(tmp, "22", b"ffmpeg\0-ss\05\0-i\0f.mp4\0")
+            self._fake_proc(tmp, "33", b"python\0uploader.py\0")
+            self._fake_proc(tmp, "44", None)
+            with patch("os.kill", side_effect=lambda pid, sig: killed.append(pid)):
+                n = web_app._kill_stray_rtmp_ffmpeg(proc_dir=tmp)
+        import signal as _signal
+        self.assertEqual(n, 1)
+        self.assertEqual(killed, [11])
+
+    def test_sweep_missing_proc_dir_returns_zero(self):
+        self.assertEqual(web_app._kill_stray_rtmp_ffmpeg(proc_dir="/nonexistent-xyz"), 0)
+
+
+class DiscardCallTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discard_active_call(self):
+        requested = []
+
+        class FakeTG:
+            async def get_entity(self, _channel):
+                return SimpleNamespace()
+
+            async def __call__(self, req):
+                requested.append(req)
+                if len(requested) == 1:
+                    return SimpleNamespace(full_chat=SimpleNamespace(
+                        call=SimpleNamespace(id=7, access_hash=8)))
+                return SimpleNamespace()
+
+        with patch.object(web_app, "telegram", FakeTG()):
+            self.assertTrue(await web_app._discard_group_call("@c"))
+        self.assertEqual(len(requested), 2)
+        self.assertEqual(requested[1].call.id, 7)
+        self.assertEqual(requested[1].call.access_hash, 8)
+
+    async def test_discard_without_active_call(self):
+        class FakeTG:
+            async def get_entity(self, _channel):
+                return SimpleNamespace()
+
+            async def __call__(self, _req):
+                return SimpleNamespace(full_chat=SimpleNamespace(call=None))
+
+        with patch.object(web_app, "telegram", FakeTG()):
+            self.assertFalse(await web_app._discard_group_call("@c"))
+
+    async def test_discard_never_raises(self):
+        class FakeTG:
+            async def get_entity(self, _channel):
+                raise RuntimeError("nope")
+
+        with patch.object(web_app, "telegram", FakeTG()):
+            self.assertFalse(await web_app._discard_group_call("@c"))
+        with patch.object(web_app, "telegram", None):
+            self.assertFalse(await web_app._discard_group_call("@c"))
+            self.assertFalse(await web_app._discard_group_call(""))
 
 
 class FakeGroupCallTelegram:

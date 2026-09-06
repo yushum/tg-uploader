@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import signal
 from collections import deque
 import math
 import os
@@ -18,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from telethon import TelegramClient
 from telethon.tl import functions
-from telethon.tl.types import DocumentAttributeVideo
+from telethon.tl.types import DocumentAttributeVideo, InputGroupCall
 
 from web_catalog import group_sessions, load_recordings, parse_http_range
 
@@ -433,6 +434,65 @@ async def _get_rtmp_url(channel_peer) -> str:
     return f"{url.rstrip('/')}/{key}" if key else url
 
 
+def _kill_stray_rtmp_ffmpeg(proc_dir: str = "/proc") -> int:
+    """兜底：杀掉所有命令行含 rtmps:// 的 ffmpeg（推流进程）。
+    缩略图/转封装只写本地文件，从不碰网络，不会误伤。proc_dir 仅供单测注入。"""
+    try:
+        pids = [p for p in os.listdir(proc_dir) if p.isdigit()]
+    except Exception as exc:
+        logger.warning("stray ffmpeg sweep: cannot list %s: %s", proc_dir, exc)
+        return 0
+    killed = 0
+    for pid in pids:
+        try:
+            with open(os.path.join(proc_dir, pid, "cmdline"), "rb") as fh:
+                cmdline = fh.read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except Exception:
+            continue
+        if "ffmpeg" not in cmdline or "rtmps://" not in cmdline:
+            continue
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+            killed += 1
+            logger.warning("stray ffmpeg sweep: killed pid=%s (%.120s)", pid, cmdline)
+        except Exception:
+            continue
+    if killed:
+        logger.warning("stray ffmpeg sweep: killed %d process(es)", killed)
+    return killed
+
+
+async def _discard_group_call(channel: str) -> bool:
+    """尽力挂断频道的群组通话，让直播间彻底消失。失败只记录不抛异常，绝不破坏停止流程。"""
+    if not channel or telegram is None:
+        return False
+    try:
+        entity = await telegram.get_entity(channel)
+    except Exception as exc:
+        logger.warning("discard group call: resolve %s failed: %s", channel, exc)
+        return False
+    try:
+        full = await telegram(functions.channels.GetFullChannelRequest(channel=entity))
+        call_ref = getattr(getattr(full, "full_chat", None), "call", None)
+        call_id = getattr(call_ref, "id", None)
+        access_hash = getattr(call_ref, "access_hash", None)
+        if not call_id or access_hash is None:
+            logger.info("discard group call: no active call on %s", channel)
+            return False
+    except Exception as exc:
+        logger.warning("discard group call: query %s failed: %s: %s",
+                       channel, type(exc).__name__, exc)
+        return False
+    try:
+        await telegram(functions.phone.DiscardGroupCallRequest(
+            call=InputGroupCall(call_id, access_hash)))
+        logger.info("discard group call: call %s on %s discarded", call_id, channel)
+        return True
+    except Exception as exc:
+        logger.warning("discard group call failed: %s: %s", type(exc).__name__, exc)
+        return False
+
+
 async def _live_worker(channel: str, message_ids: list[int], mode: str = "once") -> None:
     global live_process
     live_stop_event.clear()
@@ -512,6 +572,18 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
+                logger.info("Stream video %s: ffmpeg pid=%s started", message_id,
+                            getattr(live_process, "pid", "?"))
+                if live_stop_event.is_set():
+                    # 停止恰好落在产卵瞬间：立刻处决刚出生的进程，绝不留下无人追踪的孤儿。
+                    logger.warning("Stop arrived during ffmpeg spawn, killing pid=%s at once",
+                                   getattr(live_process, "pid", "?"))
+                    try:
+                        live_process.kill()
+                    except Exception:
+                        pass
+                    live_process = None
+                    break
                 stderr_task = asyncio.create_task(_drain_ffmpeg_stderr(live_process, ffmpeg_log))
                 progress_task = asyncio.create_task(_track_ffmpeg_progress(live_process, progress))
                 watch_task = asyncio.create_task(_watch_ffmpeg_progress(live_process, progress))
@@ -588,6 +660,8 @@ async def live_start(body: LiveStartRequest):
         raise HTTPException(status_code=400, detail=f"播放模式错误: {body.mode}（可选 once/loop/shuffle）")
     message_ids = [int(m) for m in body.message_ids]
     live_stop_event.clear()
+    # 开播前先清场：干掉历史上泄漏的幽灵推流进程，防止新旧流打架。
+    _kill_stray_rtmp_ffmpeg()
     live_state.update(status="STREAMING", channel=channel, message_ids=message_ids, index=0,
                         mode=mode, round=0,
                         current_message_id=message_ids[0], current_label=_live_label(message_ids[0]), error="")
@@ -601,9 +675,15 @@ async def live_stop():
     live_stop_event.set()
     if live_process is not None:
         try:
+            logger.info("live stop: killing tracked ffmpeg pid=%s",
+                        getattr(live_process, "pid", "?"))
             live_process.kill()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("live stop: kill tracked ffmpeg failed: %s", exc)
+    else:
+        logger.info("live stop: no tracked ffmpeg running")
+    # 即使追踪丢了，扫一遍也把幽灵推流掐死，不给“自己重开”留机会。
+    _kill_stray_rtmp_ffmpeg()
     if live_task is not None:
         live_task.cancel()
         try:
@@ -611,6 +691,8 @@ async def live_stop():
         except (asyncio.CancelledError, Exception):
             pass
         live_task = None
+    # 挂断群组通话：即使有漏网的推送，直播间也不复活。
+    await _discard_group_call(live_state.get("channel") or "")
     live_state.update(status="IDLE", current_message_id=None, current_label="",
                         mode="once", round=0, picture="")
     return {"ok": True}
