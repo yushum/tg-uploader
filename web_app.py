@@ -173,6 +173,7 @@ class BatchFavoritesItem(BaseModel):
 class LiveStartRequest(BaseModel):
     channel: str
     message_ids: list[int]
+    mode: str = "once"
 
 
 live_state = {
@@ -181,10 +182,13 @@ live_state = {
     "rtmp": "",
     "message_ids": [],
     "index": 0,
+    "mode": "once",  # once 单次 / loop 循环 / shuffle 随机
+    "round": 0,  # 当前第几轮（循环/随机模式下递增）
     "current_message_id": None,
     "current_label": "",
     "error": "",
 }
+LIVE_PLAY_MODES = ("once", "loop", "shuffle")
 live_task: asyncio.Task | None = None
 live_process: asyncio.subprocess.Process | None = None
 live_stop_event = asyncio.Event()
@@ -229,7 +233,7 @@ async def _get_rtmp_url(channel_peer) -> str:
     return f"{url.rstrip('/')}/{key}" if key else url
 
 
-async def _live_worker(channel: str, message_ids: list[int]) -> None:
+async def _live_worker(channel: str, message_ids: list[int], mode: str = "once") -> None:
     global live_process
     live_stop_event.clear()
     try:
@@ -245,60 +249,74 @@ async def _live_worker(channel: str, message_ids: list[int]) -> None:
         live_state.update(status="IDLE", error=str(exc))
         return
     live_state.update(rtmp=rtmp, status="STREAMING", error="")
-    logger.info("Live streaming to %s (%d videos)", channel, len(message_ids))
-    for position, message_id in enumerate(message_ids):
-        if live_stop_event.is_set():
-            break
-        live_state.update(index=position + 1, current_message_id=message_id,
-                           current_label=_live_label(message_id))
-        try:
-            message = await telegram.get_messages(CHANNEL_ID, ids=message_id)
-            if not message or not getattr(message, "document", None):
-                logger.warning("Skip missing message %s", message_id)
+    logger.info("Live streaming to %s (%d videos, mode=%s)", channel, len(message_ids), mode)
+    order = list(message_ids)
+    if mode == "shuffle":
+        random.shuffle(order)
+    round_no = 0
+    while True:
+        round_no += 1
+        live_state.update(round=round_no)
+        for position, message_id in enumerate(order):
+            if live_stop_event.is_set():
+                break
+            live_state.update(index=position + 1, current_message_id=message_id,
+                               current_label=_live_label(message_id))
+            try:
+                message = await telegram.get_messages(CHANNEL_ID, ids=message_id)
+                if not message or not getattr(message, "document", None):
+                    logger.warning("Skip missing message %s", message_id)
+                    continue
+                live_process = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-hide_banner", "-loglevel", "warning", "-re",
+                    "-i", "pipe:0",
+                    "-c:v", "copy", "-c:a", "aac",
+                    "-f", "flv", "-flvflags", "no_duration_filesize",
+                    rtmp,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            except Exception as exc:
+                logger.error("ffmpeg spawn failed: %s", exc)
+                live_state.update(error=str(exc))
                 continue
-            live_process = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-hide_banner", "-loglevel", "warning", "-re",
-                "-i", "pipe:0",
-                "-c:v", "copy", "-c:a", "aac",
-                "-f", "flv", "-flvflags", "no_duration_filesize",
-                rtmp,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-        except Exception as exc:
-            logger.error("ffmpeg spawn failed: %s", exc)
-            live_state.update(error=str(exc))
-            continue
-        try:
-            async for chunk in telegram.iter_download(message.document, chunk_size=512 * 1024):
-                if live_stop_event.is_set():
-                    break
-                if live_process.stdin is None or live_process.stdin.is_closing():
-                    break
+            try:
+                async for chunk in telegram.iter_download(message.document, chunk_size=512 * 1024):
+                    if live_stop_event.is_set():
+                        break
+                    if live_process.stdin is None or live_process.stdin.is_closing():
+                        break
+                    try:
+                        live_process.stdin.write(bytes(chunk))
+                        await live_process.stdin.drain()
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
                 try:
-                    live_process.stdin.write(bytes(chunk))
-                    await live_process.stdin.drain()
-                except (BrokenPipeError, ConnectionResetError):
-                    break
-            try:
-                if live_process.stdin and not live_process.stdin.is_closing():
-                    live_process.stdin.close()
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(live_process.wait(), timeout=30)
-            except asyncio.TimeoutError:
-                live_process.kill()
-        except Exception as exc:
-            logger.error("Stream video %s failed: %s", message_id, exc)
-            try:
-                live_process.kill()
-            except Exception:
-                pass
-        finally:
-            live_process = None
-    live_state.update(status="IDLE", current_message_id=None, current_label="")
+                    if live_process.stdin and not live_process.stdin.is_closing():
+                        live_process.stdin.close()
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(live_process.wait(), timeout=30)
+                except asyncio.TimeoutError:
+                    live_process.kill()
+            except Exception as exc:
+                logger.error("Stream video %s failed: %s", message_id, exc)
+                try:
+                    live_process.kill()
+                except Exception:
+                    pass
+            finally:
+                live_process = None
+        if live_stop_event.is_set() or mode == "once":
+            break
+        if mode == "shuffle":
+            random.shuffle(order)
+            logger.info("Live reshuffled for round %d", round_no + 1)
+        else:
+            logger.info("Live looping round %d", round_no + 1)
+    live_state.update(status="IDLE", current_message_id=None, current_label="", round=0)
     logger.info("Live worker finished")
 
 
@@ -314,12 +332,16 @@ async def live_start(body: LiveStartRequest):
         raise HTTPException(status_code=503, detail="Telegram 尚未连接")
     if live_state["status"] == "STREAMING":
         raise HTTPException(status_code=409, detail="已有推流任务，请先停止")
+    mode = (body.mode or "once").strip().lower()
+    if mode not in LIVE_PLAY_MODES:
+        raise HTTPException(status_code=400, detail=f"播放模式错误: {body.mode}（可选 once/loop/shuffle）")
     message_ids = [int(m) for m in body.message_ids]
     live_stop_event.clear()
     live_state.update(status="STREAMING", channel=channel, message_ids=message_ids, index=0,
+                        mode=mode, round=0,
                         current_message_id=message_ids[0], current_label=_live_label(message_ids[0]), error="")
-    live_task = asyncio.create_task(_live_worker(channel, message_ids))
-    return {"ok": True, "channel": channel, "count": len(message_ids)}
+    live_task = asyncio.create_task(_live_worker(channel, message_ids, mode))
+    return {"ok": True, "channel": channel, "count": len(message_ids), "mode": mode}
 
 
 @app.post("/api/live/stop")
@@ -338,11 +360,37 @@ async def live_stop():
         except (asyncio.CancelledError, Exception):
             pass
         live_task = None
-    live_state.update(status="IDLE", current_message_id=None, current_label="")
+    live_state.update(status="IDLE", current_message_id=None, current_label="",
+                        mode="once", round=0)
     return {"ok": True}
 
 
 MAX_LIVE_CANDIDATES = 10000
+# 超过此数量时跳过 Telegram 逐一核验，直接返回本地目录（开播时会自动跳过失效片段），
+# 避免数千个候选的串行核验把查找请求拖住几分钟。
+LIVE_VERIFY_THRESHOLD = 800
+LIVE_VERIFY_CONCURRENCY = 4
+LIVE_VERIFY_BATCH_TIMEOUT = 25
+
+
+async def _verify_live_batch(ids: list[int]) -> dict[int, dict] | None:
+    """核验一批录像是否仍在频道中。失败返回 None（未知），成功返回已确认有效的信息。"""
+    try:
+        messages = await asyncio.wait_for(
+            telegram.get_messages(CHANNEL_ID, ids=ids), timeout=LIVE_VERIFY_BATCH_TIMEOUT)
+    except Exception as exc:
+        logger.warning("live candidates batch lookup failed (%d ids): %s", len(ids), exc)
+        return None
+    if not isinstance(messages, list):
+        messages = [messages]
+    verified: dict[int, dict] = {}
+    for message in messages:
+        if message is None or not getattr(message, "document", None):
+            continue
+        details = _video_details(message)
+        if details:
+            verified[message.id] = details
+    return verified
 
 
 @app.get("/api/live/candidates")
@@ -367,23 +415,26 @@ async def live_candidates(
         key=lambda part: (part.date, part.time, part.message_id),
     )[:MAX_LIVE_CANDIDATES]
     details_by_id: dict[int, dict] = {}
-    if parts and telegram is not None:
-        ids = [part.message_id for part in parts]
-        try:
-            for offset in range(0, len(ids), 200):
-                messages = await telegram.get_messages(CHANNEL_ID, ids=ids[offset:offset + 200])
-                if not isinstance(messages, list):
-                    messages = [messages]
-                for message in messages:
-                    if message is None or not getattr(message, "document", None):
-                        continue
-                    details = _video_details(message)
-                    if details:
-                        details_by_id[message.id] = details
-        except Exception as exc:
-            logger.warning("live candidates lookup failed: %s", exc)
-    return [
-        {
+    verified_ids: set[int] = set()
+    check_availability = bool(parts) and telegram is not None and len(parts) <= LIVE_VERIFY_THRESHOLD
+    if check_availability:
+        batches = [[part.message_id for part in parts][offset:offset + 200]
+                   for offset in range(0, len(parts), 200)]
+        semaphore = asyncio.Semaphore(LIVE_VERIFY_CONCURRENCY)
+
+        async def _checked(batch: list[int]):
+            async with semaphore:
+                return batch, await _verify_live_batch(batch)
+
+        for batch, result in await asyncio.gather(*(_checked(batch) for batch in batches)):
+            if result is None:
+                continue
+            verified_ids.update(batch)
+            details_by_id.update(result)
+    items = []
+    for part in parts:
+        verified = part.message_id in verified_ids
+        items.append({
             "message_id": part.message_id,
             "streamer": part.streamer,
             "date": part.date,
@@ -391,10 +442,12 @@ async def live_candidates(
             "part_label": part.part_label,
             "label": f"{part.date} {part.time[:5]} {part.part_label}",
             "duration": details_by_id.get(part.message_id, {}).get("duration", 0),
-            "available": part.message_id in details_by_id,
-        }
-        for part in parts
-    ]
+            # 未核验（结果太多跳过核验 / 该批核验失败 / Telegram 未连接）时保持可选，
+            # 开播 worker 遇到已删除的片段会自动跳过。
+            "available": (part.message_id in details_by_id) if verified else True,
+            "verified": verified,
+        })
+    return items
 
 
 @app.get("/api/live/status")
@@ -406,6 +459,8 @@ async def live_status():
         "current": live_state["current_label"],
         "total": len(live_state["message_ids"]),
         "index": live_state["index"],
+        "mode": live_state.get("mode", "once"),
+        "round": live_state.get("round", 0),
         "error": live_state["error"],
     }
 

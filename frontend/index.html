@@ -76,7 +76,12 @@
       </section>
       <aside class="live-queue" aria-labelledby="liveQueueTitle">
         <div class="live-section-title"><div><span class="live-step">02</span><h3 id="liveQueueTitle">待播清单 <b id="liveCount">0</b></h3></div><button type="button" id="liveClear" class="live-text-button" disabled>清空</button></div>
-        <p class="live-caption">按顺序播放 · 草稿自动保存在此浏览器</p>
+        <p class="live-caption">草稿自动保存在此浏览器</p>
+        <div class="live-mode" role="radiogroup" aria-label="播放模式">
+          <label><input type="radio" name="liveMode" value="once" checked><span>单次</span><small>播完即停</small></label>
+          <label><input type="radio" name="liveMode" value="loop"><span>循环</span><small>按序重复</small></label>
+          <label><input type="radio" name="liveMode" value="shuffle"><span>随机</span><small>打乱重复</small></label>
+        </div>
         <ol class="live-playlist" id="livePlaylist"></ol>
         <div class="live-broadcast">
           <label class="live-field"><span>推流到 Telegram</span><input id="liveChannel" placeholder="@my_channel 或频道 ID" autocomplete="off" spellcheck="false" aria-describedby="liveChannelHint"></label>
