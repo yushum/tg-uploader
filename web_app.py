@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import os
+import random
 import sqlite3
 import time
 import uuid
@@ -82,7 +83,7 @@ def _proxy_config():
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global telegram
+    global telegram, live_task, live_process
     if not all((API_ID, API_HASH, CHANNEL_ID)):
         raise RuntimeError("Missing API_ID, API_HASH or CHANNEL_ID")
     ensure_web_session()
@@ -108,6 +109,21 @@ async def lifespan(_app: FastAPI):
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+        # 关闭推流：杀 FFmpeg + 取消 worker，避免残留进程
+        live_stop_event.set()
+        if live_process is not None:
+            try:
+                live_process.kill()
+            except Exception:
+                pass
+        if live_task is not None:
+            live_task.cancel()
+            try:
+                await live_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            live_task = None
+        live_state.update(status="IDLE", current_message_id=None, current_label="")
         await telegram.disconnect()
         telegram = None
 
@@ -188,15 +204,18 @@ async def _ensure_group_call_live(channel_peer) -> None:
     """在目标频道开播（已开播则忽略异常），需要管理视频聊天权限。"""
     try:
         await telegram(functions.phone.CreateGroupCallRequest(
-            peer=channel_peer, rtmp_stream=True, random_id=telegram._get_random_id() if hasattr(telegram, "_get_random_id") else 123456,
+            peer=channel_peer, rtmp_stream=True, random_id=random.randint(1, 2**63 - 1),
         ))
     except Exception as exc:
-        msg = str(exc)
-        # 已有直播 / 已在进行中则视为成功
-        if "GROUPCALL_ALREADY" in msg or "ALREADY" in msg.upper() or "ANONYM" in msg.upper():
+        name = type(exc).__name__.upper()
+        msg = f"{name}: {exc}".upper()
+        # 已有直播则视为成功
+        if "ALREADY" in msg or "ANONYM" in msg:
             logger.info("Group call already active, continue: %s", exc)
             return
-        # Telethon 常见错误名兜底：仍尝试继续获取 RTMP
+        # 权限/频道类错误直接抛给调用方，status 会显示明确原因
+        if any(key in msg for key in ("ADMIN", "FORBIDDEN", "RIGHTS", "PRIVACY", "NOTMEMBER", "NO_MEMBERS")):
+            raise
         logger.warning("CreateGroupCall result: %s", exc)
 
 
@@ -295,8 +314,9 @@ async def live_start(body: LiveStartRequest):
     if live_state["status"] == "STREAMING":
         raise HTTPException(status_code=409, detail="已有推流任务，请先停止")
     message_ids = [int(m) for m in body.message_ids]
+    live_stop_event.clear()
     live_state.update(status="STREAMING", channel=channel, message_ids=message_ids, index=0,
-                        current_message_id=message_ids[0], error="")
+                        current_message_id=message_ids[0], current_label=_live_label(message_ids[0]), error="")
     live_task = asyncio.create_task(_live_worker(channel, message_ids))
     return {"ok": True, "channel": channel, "count": len(message_ids)}
 
