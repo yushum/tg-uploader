@@ -616,7 +616,11 @@ class MergedPlayer {
     this.listen(this.gestureLayer, 'pointerup', () => this.handleLongPressEnd());
     this.listen(this.gestureLayer, 'pointercancel', () => this.handleLongPressEnd());
     this.listen(this.gestureLayer, 'pointerleave', () => this.handleLongPressEnd());
+    this.listen(window, 'pointerup', () => this.handleLongPressEnd());
+    this.listen(window, 'pointercancel', () => this.handleLongPressEnd());
+    this.listen(window, 'blur', () => { this.clearKeyHold(); this.handleLongPressEnd(); });
     this.listen(document, 'keydown', event => this.handleKeydown(event));
+    this.listen(document, 'keyup', event => this.handleKeyup(event));
 
     if ('ResizeObserver' in window) {
       this.stageResizeObserver = new ResizeObserver(() => this.syncRotationLayout());
@@ -953,15 +957,20 @@ class MergedPlayer {
 
   handleLongPressStart(event) {
     if (event.button !== undefined && event.button !== 0) return;
+    // 左键 / 触摸：长按右侧区域加速，松开恢复
     const bounds = this.gestureLayer.getBoundingClientRect();
     if ((event.clientX - bounds.left) / bounds.width < .55) return;
     clearTimeout(this.longPressTimer);
-    this.longPressTimer = setTimeout(() => {
-      this.longPressRate = this.video.playbackRate;
-      this.video.playbackRate = Math.max(2, this.video.playbackRate);
-      this.root.classList.add('is-accelerating');
-      this.showToast(`${this.video.playbackRate}× 快速播放`, 3000);
-    }, 450);
+    this.longPressTimer = setTimeout(() => this.beginAccelerating(), 450);
+  }
+
+  beginAccelerating() {
+    if (this.longPressRate != null || !this.video || this.video.ended) return;
+    this.longPressRate = this.video.playbackRate;
+    this.video.playbackRate = Math.max(2, this.video.playbackRate);
+    this.root.classList.add('is-accelerating');
+    this.root.dataset.accelRate = `${this.video.playbackRate}×`;
+    this.showToast(`${this.video.playbackRate}× 快速播放`, 3000);
   }
 
   handleLongPressEnd() {
@@ -970,6 +979,7 @@ class MergedPlayer {
     this.video.playbackRate = this.longPressRate;
     this.longPressRate = null;
     this.root.classList.remove('is-accelerating');
+    delete this.root.dataset.accelRate;
     this.suppressGestureClickUntil = Date.now() + 350;
     this.showToast('恢复正常速度');
   }
@@ -978,12 +988,23 @@ class MergedPlayer {
     if (this.destroyed || event.defaultPrevented) return;
     const tag = event.target?.tagName;
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(tag) && event.target !== this.timeline) return;
+    // 左右方向键：点按=快退/快进 10 秒，按住=加速、松开恢复原速
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      if (event.repeat || this.keyHoldKey || this.longPressRate != null) return;
+      this.keyHoldKey = event.key;
+      this.keyAccelerated = false;
+      clearTimeout(this.keyHoldTimer);
+      this.keyHoldTimer = setTimeout(() => {
+        this.keyAccelerated = true;
+        this.beginAccelerating();
+      }, 400);
+      return;
+    }
     const actions = {
       ' ': () => this.togglePlay(),
       k: () => this.togglePlay(),
-      ArrowLeft: () => this.seekBy(-10),
       j: () => this.seekBy(-10),
-      ArrowRight: () => this.seekBy(10),
       l: () => this.seekBy(10),
       ArrowUp: () => this.setVolume(this.video.volume + .05),
       ArrowDown: () => this.setVolume(this.video.volume - .05),
@@ -996,6 +1017,22 @@ class MergedPlayer {
     if (!action) return;
     event.preventDefault();
     action();
+  }
+
+  clearKeyHold() {
+    clearTimeout(this.keyHoldTimer);
+    this.keyHoldKey = null;
+    this.keyAccelerated = false;
+  }
+
+  handleKeyup(event) {
+    if (!this.keyHoldKey || event.key !== this.keyHoldKey) return;
+    const accelerated = this.keyAccelerated;
+    this.clearKeyHold();
+    // 长按已进入加速：只恢复速度，不跳转；点按：快退/快进 10 秒
+    if (accelerated) this.handleLongPressEnd();
+    else if (event.key === 'ArrowLeft') this.seekBy(-10);
+    else this.seekBy(10);
   }
 
   async toggleFullscreen() {
@@ -1066,6 +1103,7 @@ class MergedPlayer {
     clearTimeout(this.controlsTimer);
     clearTimeout(this.singleClickTimer);
     clearTimeout(this.longPressTimer);
+    clearTimeout(this.keyHoldTimer);
     this.stageResizeObserver?.disconnect();
     this.listeners.splice(0).forEach(remove => remove());
     if ('mediaSession' in navigator) {

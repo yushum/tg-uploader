@@ -474,7 +474,7 @@ h1, h2, p { margin-top: 0; }
 .video-placeholder strong { color: #fff; font-size: 16px; font-weight: 650; }
 .video-placeholder span { font-size: 12px; }
 
-.player-gesture-layer { position: absolute; z-index: 3; inset: 0; touch-action: manipulation; }
+.player-gesture-layer { position: absolute; z-index: 3; inset: 0; touch-action: manipulation; -webkit-touch-callout: none; }
 .center-play {
   position: absolute;
   z-index: 4;
@@ -615,7 +615,7 @@ h1, h2, p { margin-top: 0; }
 .volume-control:hover .volume-slider, .volume-slider:focus { width: 72px; opacity: 1; }
 .rate-select { width: 61px; height: 32px; padding: 0 3px; border: 0; border-radius: 8px; outline: 0; color: #fff; background: rgba(255, 255, 255, .16); cursor: pointer; }
 .rate-select option { color: #111; background: #fff; }
-.player-shell.is-accelerating::after { content: "长按加速中"; position: absolute; z-index: 4; top: 14px; right: 14px; padding: 5px 8px; border-radius: 6px; color: #fff; background: rgba(0, 0, 0, .6); font-size: 11px; }
+.player-shell.is-accelerating::after { content: "加速播放 " attr(data-accel-rate); position: absolute; z-index: 4; top: 14px; right: 14px; padding: 5px 8px; border-radius: 6px; color: #fff; background: rgba(0, 0, 0, .6); font-size: 11px; }
 
 .player-description { padding: 16px 2px 0; }
 .player-description h1 { margin-bottom: 7px; font-size: 20px; line-height: 1.35; letter-spacing: -.025em; }
