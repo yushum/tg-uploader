@@ -456,6 +456,16 @@ async def design_app_style():
     return FileResponse(FRONTEND_DIR / "style.css", media_type="text/css")
 
 
+@app.get("/live.js", include_in_schema=False)
+async def live_studio_script():
+    return FileResponse(FRONTEND_DIR / "live.js", media_type="text/javascript")
+
+
+@app.get("/live.css", include_in_schema=False)
+async def live_studio_style():
+    return FileResponse(FRONTEND_DIR / "live.css", media_type="text/css")
+
+
 PWA_ICONS = frozenset({"icon-192.png", "icon-512.png", "maskable-512.png", "apple-touch-icon.png"})
 
 

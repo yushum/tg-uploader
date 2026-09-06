@@ -49,6 +49,12 @@ class MediaCacheTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(Path(response.path), web_app.FRONTEND_DIR / "index.html")
             self.assertEqual(response.headers["Cache-Control"], "no-cache")
 
+    async def test_live_studio_assets_are_served(self):
+        script = await web_app.live_studio_script()
+        style = await web_app.live_studio_style()
+        self.assertEqual(Path(script.path), web_app.FRONTEND_DIR / "live.js")
+        self.assertEqual(Path(style.path), web_app.FRONTEND_DIR / "live.css")
+
     async def test_concurrent_read_downloads_block_once_then_hits_cache(self):
         data = bytes((index % 251 for index in range(web_app.MEDIA_CACHE_BLOCK_SIZE + 37)))
         details = {"size": len(data), "mime_type": "video/mp4"}
