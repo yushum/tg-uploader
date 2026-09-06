@@ -1,4 +1,5 @@
 import asyncio
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -276,6 +277,24 @@ class LivePlayModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.streamed, [7, 8, 7, 8, 7])
         self.assertEqual(web_app.live_state["status"], "IDLE")
 
+    async def test_worker_skips_video_on_fetch_timeout(self):
+        fake = FakeStreamTelegram()
+
+        async def _timeout(_channel, *, ids):
+            raise asyncio.TimeoutError()
+
+        fake.get_messages = _timeout
+        with patch.object(web_app, "telegram", fake), patch.object(
+            web_app, "_catalog", return_value=[]
+        ), patch.object(web_app, "_ensure_group_call_live", new=AsyncMock()), patch.object(
+            web_app, "_get_rtmp_url", new=AsyncMock(return_value="rtmp://x/live")
+        ), patch.object(asyncio, "create_subprocess_exec",
+                         new=AsyncMock(side_effect=lambda *a, **k: FakeStreamProc())):
+            await web_app._live_worker("@c", [7], "once")
+        self.assertEqual(fake.streamed, [])
+        self.assertEqual(web_app.live_state["status"], "IDLE")
+        self.assertIn("超时", web_app.live_state["error"])
+
     async def test_worker_shuffle_reorders_each_round(self):
         fake = FakeStreamTelegram(stop_after=2)
         with patch.object(web_app, "telegram", fake), patch.object(
@@ -288,6 +307,44 @@ class LivePlayModeTests(unittest.IsolatedAsyncioTestCase):
             await web_app._live_worker("@c", [7, 8], "shuffle")
         self.assertEqual(fake.streamed, [8, 7])
         self.assertEqual(mock_shuffle.call_count, 1)
+
+
+class FakeGroupCallTelegram:
+    def __init__(self, effect=None):
+        self.effect = effect
+
+    async def __call__(self, _request):
+        if isinstance(self.effect, Exception):
+            raise self.effect
+        return SimpleNamespace()
+
+
+class EnsureGroupCallTests(unittest.IsolatedAsyncioTestCase):
+    async def test_random_id_fits_int32(self):
+        captured = {}
+        orig = web_app.functions.phone.CreateGroupCallRequest
+
+        def spy(*args, **kwargs):
+            captured.update(kwargs)
+            return orig(*args, **kwargs)
+
+        with patch.object(web_app.functions.phone, "CreateGroupCallRequest",
+                           side_effect=spy), patch.object(
+            web_app, "telegram", FakeGroupCallTelegram()
+        ):
+            await web_app._ensure_group_call_live(SimpleNamespace())
+        self.assertTrue(1 <= captured["random_id"] <= 2**31 - 1)
+
+    async def test_already_active_is_ignored(self):
+        with patch.object(web_app, "telegram",
+                           FakeGroupCallTelegram(RuntimeError("GROUPCALL_ALREADY_ACTIVE"))):
+            await web_app._ensure_group_call_live(SimpleNamespace())
+
+    async def test_unexpected_error_is_reraised_not_faked(self):
+        with patch.object(web_app, "telegram",
+                           FakeGroupCallTelegram(struct.error("'i' format requires ..."))):
+            with self.assertRaises(struct.error):
+                await web_app._ensure_group_call_live(SimpleNamespace())
 
 
 if __name__ == "__main__":

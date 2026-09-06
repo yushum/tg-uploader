@@ -208,8 +208,9 @@ def _live_label(message_id: int) -> str:
 async def _ensure_group_call_live(channel_peer) -> None:
     """在目标频道开播（已开播则忽略异常），需要管理视频聊天权限。"""
     try:
+        # random_id 是 32 位整型，超范围会在本地序列化失败，直播间实际建不起来。
         await telegram(functions.phone.CreateGroupCallRequest(
-            peer=channel_peer, rtmp_stream=True, random_id=random.randint(1, 2**63 - 1),
+            peer=channel_peer, rtmp_stream=True, random_id=random.randint(1, 2**31 - 1),
         ))
     except Exception as exc:
         name = type(exc).__name__.upper()
@@ -221,7 +222,10 @@ async def _ensure_group_call_live(channel_peer) -> None:
         # 权限/频道类错误直接抛给调用方，status 会显示明确原因
         if any(key in msg for key in ("ADMIN", "FORBIDDEN", "RIGHTS", "PRIVACY", "NOTMEMBER", "NO_MEMBERS")):
             raise
-        logger.warning("CreateGroupCall result: %s", exc)
+        # 未知错误绝不能当作“已开播”放行，否则会出现网页显示推流中、
+        # 频道却没有直播的假象。
+        logger.error("CreateGroupCall failed: %s: %s", type(exc).__name__, exc)
+        raise
 
 
 async def _get_rtmp_url(channel_peer) -> str:
@@ -263,10 +267,23 @@ async def _live_worker(channel: str, message_ids: list[int], mode: str = "once")
             live_state.update(index=position + 1, current_message_id=message_id,
                                current_label=_live_label(message_id))
             try:
-                message = await telegram.get_messages(CHANNEL_ID, ids=message_id)
-                if not message or not getattr(message, "document", None):
-                    logger.warning("Skip missing message %s", message_id)
-                    continue
+                message = await asyncio.wait_for(
+                    telegram.get_messages(CHANNEL_ID, ids=message_id),
+                    timeout=LIVE_STREAM_FETCH_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error("Stream video %s: 获取录像信息超时，已跳过", message_id)
+                live_state.update(error=f"片段 {message_id} 获取超时，已跳过")
+                continue
+            except Exception as exc:
+                logger.error("Stream video %s lookup failed: %s: %s",
+                             message_id, type(exc).__name__, exc)
+                live_state.update(error=f"片段 {message_id} 读取失败，已跳过")
+                continue
+            if not message or not getattr(message, "document", None):
+                logger.warning("Skip missing message %s", message_id)
+                continue
+            try:
                 live_process = await asyncio.create_subprocess_exec(
                     "ffmpeg", "-hide_banner", "-loglevel", "warning", "-re",
                     "-i", "pipe:0",
@@ -365,6 +382,7 @@ async def live_stop():
     return {"ok": True}
 
 
+LIVE_STREAM_FETCH_TIMEOUT = 60
 MAX_LIVE_CANDIDATES = 10000
 # 超过此数量时跳过 Telegram 逐一核验，直接返回本地目录（开播时会自动跳过失效片段），
 # 避免数千个候选的串行核验把查找请求拖住几分钟。
@@ -379,7 +397,8 @@ async def _verify_live_batch(ids: list[int]) -> dict[int, dict] | None:
         messages = await asyncio.wait_for(
             telegram.get_messages(CHANNEL_ID, ids=ids), timeout=LIVE_VERIFY_BATCH_TIMEOUT)
     except Exception as exc:
-        logger.warning("live candidates batch lookup failed (%d ids): %s", len(ids), exc)
+        logger.warning("live candidates batch lookup failed (%d ids): %s: %s",
+                         len(ids), type(exc).__name__, exc)
         return None
     if not isinstance(messages, list):
         messages = [messages]
